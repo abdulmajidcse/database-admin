@@ -5,6 +5,28 @@ One tool for **MySQL, MariaDB, PostgreSQL, SQLite, Redis and MongoDB** — local
 
 Built to [PLAN.md](PLAN.md); every non-obvious decision in the code cites the section it implements.
 
+![Browsing a PostgreSQL table](docs/screenshots/05-table-data.png)
+
+<details>
+<summary>More screenshots</summary>
+
+**Connecting.** Where the database is and how you reach it are separate choices, so a direct
+connection and one through a bastion differ only in the Access section.
+
+![The new connection dialog](docs/screenshots/02-connection-dialog.png)
+
+**The object tree.** Databases, schemas, tables, views, routines, sequences, triggers and enums —
+virtualised, so a schema with hundreds of tables stays responsive.
+
+![The object tree](docs/screenshots/04-object-tree.png)
+
+**First run.** Accounts are local to the machine; connections are private to the account that
+created them.
+
+![Creating an account](docs/screenshots/01-create-account.png)
+
+</details>
+
 ---
 
 ## Quick start

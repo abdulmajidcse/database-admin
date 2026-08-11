@@ -1,0 +1,70 @@
+name: Bug report
+description: Something behaves differently from what you expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report security vulnerabilities here — use
+        [private reporting](https://github.com/abdulmajidcse/database-admin/security/advisories/new)
+        instead. This tool holds database credentials.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        1. Opened a Postgres connection
+        2. Expanded the schema
+        3. Expected the tables to appear; the tree stayed empty
+    validations:
+      required: true
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Database engine
+      description: Which engine the problem involves. Pick "not engine-specific" for UI or app-level issues.
+      options:
+        - PostgreSQL
+        - MySQL
+        - MariaDB
+        - Redis
+        - MongoDB
+        - SQLite
+        - Not engine-specific
+    validations:
+      required: true
+
+  - type: input
+    id: engine-version
+    attributes:
+      label: Engine version
+      description: The server version, if the issue involves one. The status bar shows it.
+      placeholder: PostgreSQL 17.10
+
+  - type: dropdown
+    id: setup
+    attributes:
+      label: How are you running it
+      options:
+        - Docker (compose.yml, production image)
+        - Docker (compose.dev.yml, dev stack)
+        - Directly on the host with npm
+    validations:
+      required: true
+
+  - type: input
+    id: access
+    attributes:
+      label: How is the database reached
+      description: Direct, SSH tunnel, bastion chain, proxy process, unix socket. This is often the difference between a bug reproducing and not.
+      placeholder: SSH tunnel via a bastion
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Container logs, an error message, or the browser console. Redact hostnames and credentials.
+      render: shell
