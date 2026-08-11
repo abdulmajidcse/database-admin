@@ -1,0 +1,139 @@
+# PLAN §10.2 — development. Bind-mounts source for HMR, and carries a `dbs`
+# profile with all five engines so there is something to develop against.
+#
+#   docker compose -f compose.dev.yml up                    # dev app only
+#   docker compose -f compose.dev.yml --profile dbs up      # dev app + every engine
+#
+# The service is `devapp`, not `app`, on purpose. Both files share the project
+# name `database-admin`, so a service called `app` here would resolve to the
+# same container as compose.yml's — and starting the engines would converge
+# that container, SIGTERM-ing a running production app. Different names make
+# each file's container a harmless orphan to the other. They still both
+# publish 3456, so run one stack or the other, not both.
+#
+# node_modules stays in a named volume so the Linux-built native modules are
+# never shadowed by a macOS-built host directory.
+
+services:
+  devapp:
+    build:
+      context: .
+      target: deps
+    command: sh -c "npm install --no-audit --no-fund && npm run dev"
+    working_dir: /app
+    ports:
+      - "127.0.0.1:${DBADMIN_PORT:-3456}:${DBADMIN_PORT:-3456}"
+    environment:
+      NODE_ENV: development
+      PORT: ${DBADMIN_PORT:-3456}
+      DBADMIN_HOME: /data/app
+      DBADMIN_SQLITE_ROOT: /data/sqlite
+      DBADMIN_EXPORT_ROOT: /data/exports
+      SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
+      WATCHPACK_POLLING: "true"
+    volumes:
+      - .:/app
+      - dbadmin-node-modules:/app/node_modules
+      - dbadmin-next-cache:/app/.next
+      - dbadmin-dev-data:/data/app
+      - ./data/sqlite:/data/sqlite
+      - ./data/exports:/data/exports
+      - ${HOME}/.ssh:/home/node/.ssh:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [dbadmin]
+
+  mysql:
+    profiles: [dbs]
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: dbadmin
+      MYSQL_DATABASE: sample
+      MYSQL_USER: dbadmin
+      MYSQL_PASSWORD: dbadmin
+    command: --local-infile=1
+    ports: ["127.0.0.1:13306:3306"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./tests/fixtures/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pdbadmin"]
+      interval: 5s
+      retries: 20
+    networks: [dbadmin]
+
+  mariadb:
+    profiles: [dbs]
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: dbadmin
+      MARIADB_DATABASE: sample
+      MARIADB_USER: dbadmin
+      MARIADB_PASSWORD: dbadmin
+    ports: ["127.0.0.1:13307:3306"]
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      retries: 20
+    networks: [dbadmin]
+
+  postgres:
+    profiles: [dbs]
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: dbadmin
+      POSTGRES_USER: dbadmin
+      POSTGRES_DB: sample
+    ports: ["127.0.0.1:15432:5432"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./tests/fixtures/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dbadmin -d sample"]
+      interval: 5s
+      retries: 20
+    networks: [dbadmin]
+
+  redis:
+    profiles: [dbs]
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:16379:6379"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+    networks: [dbadmin]
+
+  mongo:
+    profiles: [dbs]
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: dbadmin
+      MONGO_INITDB_ROOT_PASSWORD: dbadmin
+    ports: ["127.0.0.1:17017:27017"]
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      retries: 20
+    networks: [dbadmin]
+
+volumes:
+  dbadmin-node-modules:
+  dbadmin-next-cache:
+  dbadmin-dev-data:
+  mysql-data:
+  mariadb-data:
+  postgres-data:
+  redis-data:
+  mongo-data:
+
+networks:
+  dbadmin:
+    driver: bridge

@@ -1,0 +1,40 @@
+# PLAN §10.2 — production-ish run of the app.
+#
+# The port publish is the security control (§9): 127.0.0.1 only. Docker writes
+# firewall rules that bypass the host firewall, so a bare `PORT:PORT` would expose a
+# credentialed database admin to the whole LAN.
+
+services:
+  app:
+    build:
+      context: .
+      target: runtime
+    image: database-admin:latest
+    ports:
+      - "127.0.0.1:${DBADMIN_PORT:-3456}:${DBADMIN_PORT:-3456}"
+    environment:
+      PORT: ${DBADMIN_PORT:-3456}
+      DBADMIN_HOME: /data/app
+      # Where the SQLite file browser and export picker are rooted (§10.4).
+      DBADMIN_SQLITE_ROOT: /data/sqlite
+      DBADMIN_EXPORT_ROOT: /data/exports
+      # Docker Desktop's SSH agent bridge (§10.3). Harmless when absent.
+      SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
+    volumes:
+      - dbadmin-data:/data/app
+      - ${DBADMIN_SQLITE_DIR:-./data/sqlite}:/data/sqlite
+      - ${DBADMIN_EXPORT_DIR:-./data/exports}:/data/exports
+      - ${HOME}/.ssh:/home/node/.ssh:ro
+      - /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock
+    extra_hosts:
+      # Linux parity with Docker Desktop.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks: [dbadmin]
+
+volumes:
+  dbadmin-data:
+
+networks:
+  dbadmin:
+    driver: bridge

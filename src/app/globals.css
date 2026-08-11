@@ -1,0 +1,190 @@
+@import "tailwindcss";
+
+/*
+ * IDE-shaped theme. Dense, low-chrome, high information density — this is a
+ * tool you keep open all day, not a marketing page.
+ */
+
+@theme {
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --font-sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+:root {
+  --bg: #ffffff;
+  --bg-subtle: #f6f7f9;
+  --bg-panel: #fbfcfd;
+  --bg-hover: #eef1f5;
+  --bg-active: #e3e8ef;
+  --border: #dfe3e8;
+  --border-strong: #c5ccd6;
+  --fg: #1a1d21;
+  --fg-muted: #626a75;
+  --fg-subtle: #8a929c;
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+  --danger: #dc2626;
+  --danger-bg: #fef2f2;
+  --warn: #b45309;
+  --warn-bg: #fffbeb;
+  --ok: #15803d;
+  --ok-bg: #f0fdf4;
+  --null-fg: #9aa3ad;
+  --selection: #dbeafe;
+  --row-alt: #fafbfc;
+  --grid-header: #f2f4f7;
+  --shadow: 0 1px 2px rgb(16 24 40 / 0.06), 0 1px 3px rgb(16 24 40 / 0.1);
+}
+
+:root[data-theme="dark"],
+:root:not([data-theme="light"]) {
+  @media (prefers-color-scheme: dark) {
+    --bg: #16181c;
+    --bg-subtle: #1b1e23;
+    --bg-panel: #1e2126;
+    --bg-hover: #262a31;
+    --bg-active: #2f343c;
+    --border: #2c3038;
+    --border-strong: #3d434d;
+    --fg: #e6e9ee;
+    --fg-muted: #9aa3ae;
+    --fg-subtle: #6d7681;
+    --accent: #4f8cff;
+    --accent-fg: #0b1220;
+    --danger: #f87171;
+    --danger-bg: #2a1618;
+    --warn: #fbbf24;
+    --warn-bg: #2a2214;
+    --ok: #4ade80;
+    --ok-bg: #14251a;
+    --null-fg: #6b737d;
+    --selection: #1e3a5f;
+    --row-alt: #1a1d22;
+    --grid-header: #22262c;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 2px 6px rgb(0 0 0 / 0.3);
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #16181c;
+  --bg-subtle: #1b1e23;
+  --bg-panel: #1e2126;
+  --bg-hover: #262a31;
+  --bg-active: #2f343c;
+  --border: #2c3038;
+  --border-strong: #3d434d;
+  --fg: #e6e9ee;
+  --fg-muted: #9aa3ae;
+  --fg-subtle: #6d7681;
+  --accent: #4f8cff;
+  --accent-fg: #0b1220;
+  --danger: #f87171;
+  --danger-bg: #2a1618;
+  --warn: #fbbf24;
+  --warn-bg: #2a2214;
+  --ok: #4ade80;
+  --ok-bg: #14251a;
+  --null-fg: #6b737d;
+  --selection: #1e3a5f;
+  --row-alt: #1a1d22;
+  --grid-header: #22262c;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 2px 6px rgb(0 0 0 / 0.3);
+}
+
+* {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden; /* the workspace owns its own scrolling */
+}
+
+::selection {
+  background: var(--selection);
+}
+
+/* Thin scrollbars, IDE style. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-subtle);
+  background-clip: content-box;
+}
+
+@layer utilities {
+  .surface {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+  }
+  .mono {
+    font-family: var(--font-mono);
+    font-variant-ligatures: none;
+    font-size: 12px;
+  }
+  .null-cell {
+    color: var(--null-fg);
+    font-style: italic;
+  }
+  .focus-ring:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
+}
+
+/* CodeMirror should fill its pane and use our tokens. */
+.cm-editor {
+  height: 100%;
+  background: var(--bg) !important;
+  color: var(--fg);
+}
+.cm-editor.cm-focused {
+  outline: none !important;
+}
+.cm-gutters {
+  background: var(--bg-subtle) !important;
+  border-right: 1px solid var(--border) !important;
+  color: var(--fg-subtle) !important;
+}
+.cm-activeLine {
+  background: var(--bg-hover) !important;
+}
+.cm-activeLineGutter {
+  background: var(--bg-hover) !important;
+}
+
+/* React Flow (ER diagram) tokens. */
+.react-flow__background {
+  background: var(--bg-subtle);
+}
+.react-flow__edge-path {
+  stroke: var(--border-strong);
+}
+.react-flow__handle {
+  background: var(--accent);
+  border: none;
+}

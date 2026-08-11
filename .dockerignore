@@ -1,0 +1,8 @@
+# Never ship a macOS-built native module into a Linux image (PLAN §11).
+node_modules
+.next
+.git
+*.log
+data
+/private
+scratchpad
