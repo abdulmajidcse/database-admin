@@ -295,3 +295,19 @@ server.ts       http + Next handler + WebSocket upgrade
 
 `src/server/**` imports no React and no Next types, so it can be lifted into a package or an Electron
 main process later without touching a line.
+
+---
+
+## Contributing
+
+Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers getting a working copy, the
+checks to run before opening a pull request, and a handful of things that are easy to get wrong
+here — the two compose files sharing a project name, and never hardcoding your own connection names
+into the end-to-end tests.
+
+Found a security issue? Please read [SECURITY.md](SECURITY.md) and report it privately rather than
+opening a public issue — this tool holds database credentials.
+
+## Licence
+
+[MIT](LICENSE) © Md Abdul Majid
