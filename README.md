@@ -25,6 +25,9 @@ Then open:
 http://127.0.0.1:3456/
 ```
 
+Prefer to run it directly on your machine? See [Running without Docker](#running-without-docker) —
+it needs Node 22 and gives up the bundled dump tools, but local databases get simpler.
+
 Sign in, or create an **account** from the link on the sign-in screen. Accounts exist only on this
 machine, in `accounts.json` under `DBADMIN_HOME` — nothing is registered anywhere.
 
@@ -188,6 +191,91 @@ host-built directory. Never copy `node_modules` from the host into the image.
 Tests run against real engines via testcontainers — introspection SQL cannot be meaningfully unit
 tested. They run on the host or in CI, not inside the app container, which would need the Docker
 socket mounted.
+
+---
+
+## Running without Docker
+
+Docker is the supported path, but nothing stops you running the app directly on the host. Node 22
+or newer is required (`"engines": { "node": ">=22" }`).
+
+```bash
+npm install
+
+npm run dev      # tsx watch, HMR, http://127.0.0.1:3456
+# or
+npm run build    # next build
+npm start        # production server, same port
+```
+
+`npm run typecheck`, `npm test` and `npm run lint` work the same way.
+
+### What gets easier
+
+**`localhost` means your machine again.** There is no container boundary, so a database on this
+host is reachable at `localhost:5432` directly — `host.docker.internal` is neither needed nor
+resolvable. The app detects this and stops offering the rewrite hint.
+
+**ssh-agent works properly.** `SSH_AUTH_SOCK` is the real one rather than Docker Desktop's bridged
+socket, so agent authentication for SSH tunnels works without the `/run/host-services` mount that
+only exists under Docker Desktop.
+
+Remote databases are otherwise unchanged: every driver (`mysql2`, `pg`, `mongodb`, `ioredis`) and
+the SSH implementation (`ssh2`) is pure JavaScript.
+
+### What changes
+
+Paths move out of `/data` and into your home directory, so a host run and a container run keep
+entirely separate accounts and connections:
+
+| | container | host |
+| --- | --- | --- |
+| accounts, connections | `/data/app` | `~/.dbadmin` |
+| SQLite browser root | `/data/sqlite` | `~/sqlite` |
+| export destination | `/data/exports` | `~/dbadmin-exports` |
+
+Override with `DBADMIN_HOME`, `DBADMIN_SQLITE_ROOT` and `DBADMIN_EXPORT_ROOT`. The server also
+binds `127.0.0.1` instead of `0.0.0.0`, since there is no container network to publish from.
+
+### Native dump tools are not included
+
+The image bakes in every dump/restore binary (§10.1); your host almost certainly has none of them.
+Without them the **native** dump and restore paths fail with a clear error — the built-in streaming
+export (CSV, JSON, XLSX, SQL) is pure JavaScript and keeps working regardless.
+
+```bash
+brew install postgresql@17 mongodb-database-tools redis sqlite
+brew install mysql-client
+```
+
+`postgresql@17` needs no PATH changes — the detector scans `/opt/homebrew/opt/postgresql@*/bin`
+directly and picks the right major per connection, since `pg_dump` must be at least the server's
+version. Install several majors side by side if you dump from several servers.
+
+Everything else is found on `PATH` only, and `mysql-client` is keg-only, so it needs:
+
+```bash
+export PATH="/opt/homebrew/opt/mysql-client/bin:$PATH"
+```
+
+### Engines to develop against
+
+Running the app on the host does not mean running databases there. The simplest combination is
+host app plus containerised engines:
+
+```bash
+docker compose -f compose.dev.yml --profile dbs up -d mysql mariadb postgres redis mongo
+```
+
+They publish on `127.0.0.1` at the ports `tests/helpers/engines.ts` already defaults to, so
+`npm test` finds them with no configuration.
+
+### One rule
+
+Never let a host-built `node_modules` reach the image. macOS-built native modules do not run on
+Linux, which is why `node_modules` is the first line of `.dockerignore`. Building the image from a
+tree you have run `npm install` in is safe — the ignore file handles it — but never copy the
+directory in by hand.
 
 ---
 
