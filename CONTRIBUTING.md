@@ -44,16 +44,29 @@ DBADMIN_PORT=3457 docker compose -f compose.dev.yml up -d devapp
 
 ```bash
 docker compose -f compose.dev.yml exec devapp npm run typecheck
-docker compose -f compose.dev.yml exec devapp npm run lint
-npm test    # from the host, with the dbs profile running
+docker compose -f compose.dev.yml exec devapp npm test
 ```
 
-`npm test` runs on the **host**, not inside the app container — running it inside would
-require mounting the Docker socket. It talks to the engines on their published ports, which
-`tests/helpers/engines.ts` already defaults to. Engine-backed suites skip loudly when an
-engine is unreachable; a skipped suite is not a passing one, so start the `dbs` profile first.
+`npm test` is vitest. Today that means 216 unit tests over the SQL lexer, the changeset
+builder and the schema differ — they need no database and finish in well under a second.
 
-Introspection SQL cannot be meaningfully unit tested — it has to run against a real server.
+**The engine-backed suite is not wired up yet, and this is the single most useful thing to
+contribute.** `tests/helpers/engines.ts` and `tests/smoke/*.ts` exist and are written, but
+nothing imports them and vitest only collects `**/*.test.ts`, so none of it runs. Introspection
+SQL cannot be meaningfully unit tested — it has to execute against a real server — so every
+connector change is currently unverified by CI.
+
+If you pick this up: the helper reads `TEST_MYSQL_HOST`, `TEST_PG_PORT` and friends, defaulting
+to the ports `compose.dev.yml` publishes on `127.0.0.1`. Running inside the container instead,
+point them at the compose service names:
+
+```bash
+docker compose -f compose.dev.yml run --rm --no-deps \
+  -e TEST_PG_HOST=postgres -e TEST_PG_PORT=5432 \
+  -e TEST_MYSQL_HOST=mysql -e TEST_MYSQL_PORT=3306 \
+  devapp npm test
+```
+
 If you touch a connector, add a case that exercises it against the real engine.
 
 ## Never hardcode your own environment
