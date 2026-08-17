@@ -127,6 +127,11 @@ export interface FilePickerProps {
   roots?: FileRootKey[];
   /** `save` adds a filename field and returns directory + name. */
   mode?: 'open' | 'save' | 'directory';
+  /**
+   * The chosen directory must be writable. True for an export destination;
+   * false for a bundle import, which only reads the folder it is given.
+   */
+  requireWritable?: boolean;
   /** Extension filter, e.g. ['.csv', '.tsv']. Directories are always listed. */
   extensions?: string[];
   /** Pre-filled filename in `save` mode. */
@@ -143,6 +148,7 @@ export function FilePicker({
   root = 'export',
   roots,
   mode = 'open',
+  requireWritable = false,
   extensions,
   defaultName,
   initialPath,
@@ -302,6 +308,10 @@ export function FilePicker({
                       setDir(e.path);
                       return;
                     }
+                    // Choosing a folder means a file row is not a choice at all.
+                    // Returning one here handed a `.csv` path back as the
+                    // directory to write tables into, or to read them from.
+                    if (mode === 'directory') return;
                     if (mode === 'save') setName(e.name);
                     else {
                       onPick(e.path);
@@ -331,7 +341,9 @@ export function FilePicker({
             onChange={(e) => setShowHidden(e.target.checked)}
             label="Show dotfiles"
           />
-          {data && !data.writable && mode === 'save' && (
+          {/* An export writes into exactly the folder being chosen, so this
+              warning matters at least as much in directory mode as in save. */}
+          {data && !data.writable && (mode === 'save' || requireWritable) && (
             <span className="flex items-center gap-1 text-[11px] text-[var(--warn)]">
               <TriangleAlert className="size-3" /> This directory is not writable by the server.
             </span>
@@ -343,6 +355,7 @@ export function FilePicker({
             <Button
               size="sm"
               variant="primary"
+              disabled={requireWritable && !data.writable}
               onClick={() => {
                 onPick(data.path);
                 onClose();
@@ -467,6 +480,7 @@ export function FilePathField({
   root = 'export',
   roots,
   mode = 'open',
+  requireWritable = false,
   extensions,
   defaultName,
   placeholder,
@@ -478,6 +492,8 @@ export function FilePathField({
   root?: FileRootKey;
   roots?: FileRootKey[];
   mode?: 'open' | 'save' | 'directory';
+  /** The chosen directory must be writable — an export destination, not a source. */
+  requireWritable?: boolean;
   extensions?: string[];
   defaultName?: string;
   placeholder?: string;
@@ -504,6 +520,7 @@ export function FilePathField({
         root={root}
         roots={roots}
         mode={mode}
+        requireWritable={requireWritable}
         extensions={extensions}
         defaultName={defaultName ?? (value ? baseName(value) : undefined)}
         initialPath={value || undefined}

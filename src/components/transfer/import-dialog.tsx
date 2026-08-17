@@ -848,11 +848,22 @@ function useDebounced<T>(value: T, ms: number): T {
   return settled;
 }
 
+/** A path naming a data file, so not the folder a bundle import reads. */
+const DATA_FILE = /\.(csv|tsv|json|ndjson|sql|dump|backup|bak|pgdump|custom|xlsx|zip|gz|zst)$/i;
+
 function validate(state: { connectionId: string | null; path: string; kind: SourceKind; tableName: string }): string[] {
   const out: string[] = [];
   if (!state.connectionId) out.push('Pick a connection first.');
-  if (state.path.trim() === '') out.push('Choose a file to import.');
+  const path = state.path.trim();
+  if (path === '') out.push(state.kind === 'bundle' ? 'Choose a folder to import.' : 'Choose a file to import.');
   // A bundle names a table per file, so an empty box is correct there.
   if (!namesOwnTargets(state.kind) && state.tableName.trim() === '') out.push('Name the target table.');
+  // Switching the File type does not revisit a path already chosen, so a file
+  // picked as CSV survives into a bundle import — where it reaches the server,
+  // starts a job, and dies with ENOTDIR from readdir in the drawer. Nothing
+  // before this point looks at the path's shape.
+  if (state.kind === 'bundle' && path !== '' && DATA_FILE.test(path)) {
+    out.push(`A folder of CSVs is needed here, but "${path}" names a file.`);
+  }
   return out;
 }
