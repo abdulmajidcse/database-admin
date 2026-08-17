@@ -80,7 +80,7 @@ import {
   type OnConflict,
 } from './fastpath';
 import { runSqlScript, type ScriptError, type ScriptExecutor, type ScriptResult } from './dump-runner';
-import { bundleMembers } from './bundle';
+import { bundleMemberOverrides, bundleMembers } from './bundle';
 
 // ---------------------------------------------------------------------------
 // Job contract
@@ -225,6 +225,16 @@ export async function runImport(params: ImportParams, ctx: JobRunnerContext): Pr
   if (isScript && config.engine === 'mongodb') {
     throw new DbError('MongoDB cannot run a SQL script; import JSON or NDJSON instead.', 'UNSUPPORTED');
   }
+  // `openTarget` binds a Mongo handle to one collection, so a bundle — which
+  // needs a different target per file — can never work there. Say so, rather
+  // than failing later with "a target collection is required" for a wizard that
+  // deliberately never asked for one.
+  if (params.source.kind === 'bundle' && config.engine === 'mongodb') {
+    throw new DbError(
+      'MongoDB cannot import a folder of CSVs; import one collection at a time.',
+      'UNSUPPORTED',
+    );
+  }
 
   const file = resolveImportPath(params.source.path);
   const fileSize = (await stat(file)).size;
@@ -291,24 +301,38 @@ async function runBundleImport(
   ctx.progress({ phase: 'starting', tablesTotal: members.length, tablesDone: 0 });
 
   const reports: ImportReport[] = [];
+  const loaded: string[] = [];
   for (const [index, member] of members.entries()) {
     const name = basename(member.path);
     ctx.log(`[${index + 1}/${members.length}] ${name} → ${member.table}`);
     const size = (await stat(member.path)).size;
 
-    const memberParams: ImportParams = {
-      ...params,
-      // Each file is an ordinary CSV import; `mapping: []` is what makes
-      // runRowImport derive one from *this* file's header rather than reusing a
-      // mapping that belongs to a different table.
-      source: { kind: 'csv', path: member.path },
-      target: { ...params.target, table: member.table },
-      mapping: [],
-    };
+    const memberParams: ImportParams = { ...params, ...bundleMemberOverrides(params, member) };
 
-    reports.push(
-      await runRowImport(memberParams, options, config, target, member.path, size, ctx, startedAt, warnings),
-    );
+    try {
+      reports.push(
+        // Its own `startedAt`: the ETA is computed from bytes read against
+        // elapsed time, so sharing the bundle's start makes every member after
+        // the first report a progressively more wrong estimate.
+        await runRowImport(memberParams, options, config, target, member.path, size, ctx, Date.now(), warnings),
+      );
+      loaded.push(member.table);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Members commit individually, so by the time one fails the earlier ones
+      // are already durable. Saying which is the difference between a recoverable
+      // restore and a database in an unknown state.
+      const done = loaded.length === 0 ? 'none' : loaded.join(', ');
+      ctx.log(`${member.table} failed: ${message}`);
+      ctx.log(`Committed before the failure: ${done}. Not attempted: ${members.length - index - 1} file(s).`);
+      warnings.push(`${member.table} failed: ${message}`);
+      if (!options.continueOnError) {
+        throw new DbError(
+          `Bundle import stopped at ${name}: ${message}. Already committed: ${done}.`,
+          'BUNDLE_MEMBER_FAILED',
+        );
+      }
+    }
     ctx.progress({ phase: 'importing', tablesTotal: members.length, tablesDone: index + 1 });
   }
 

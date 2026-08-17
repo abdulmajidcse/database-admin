@@ -438,7 +438,10 @@ export function startExportJob(req: ApiExportRequest, path: string): string {
     kind: 'export',
     source: jobSource(req),
     format: req.format,
-    destination: { kind: 'file', path: absolute },
+    // The real shape, not always 'file': the persisted row is what the drawer
+    // and any later inspection read, and `perTable` lives only in the closure
+    // below — so recording 'file' for a directory export makes the row lie.
+    destination: { kind: perTable ? 'directory' : 'file', path: absolute },
     options: req.options,
   };
   const title = perTable

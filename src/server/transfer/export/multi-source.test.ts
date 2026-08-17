@@ -144,6 +144,92 @@ describe('multi-source exports into a zip archive', () => {
 });
 
 describe('multi-source exports into a directory', () => {
+  /** A source that fails once the export is already under way. */
+  function exploding(label: string): ExportSourceSpec {
+    return {
+      kind: 'rows',
+      label,
+      columns: columns(['id']),
+      rows: (async function* () {
+        throw new Error('table vanished mid-export');
+      })(),
+    } as ExportSourceSpec;
+  }
+
+  it('keeps two tables whose names sanitise alike in separate files', async () => {
+    // `my table` and `my_table` are both legal in MySQL and SQLite, and
+    // sanitizeFileStem maps both to `my_table.csv`. Writing them to one name
+    // loses a whole table and still reports success.
+    const dir = await mkdtemp(path.join(tmpdir(), 'dbadmin-export-'));
+    await runExport({
+      connector: fakeConnector(),
+      format: 'csv',
+      sources: [
+        table('my table', ['id'], [[1]]),
+        table('my_table', ['id'], [[2]]),
+      ],
+      destination: { kind: 'directory', path: dir, root: dir },
+      consistentSnapshot: false,
+      content: 'data',
+    });
+
+    const written = (await readdir(dir)).filter((f) => f.endsWith('.csv'));
+    expect(written).toHaveLength(2);
+  });
+
+  it('marks a failed directory export so it cannot pass as a complete one', async () => {
+    // The files already written stay on disk, and a directory of CSVs is exactly
+    // what a bundle import consumes — so without a marker, half a database
+    // restores as though it were all of it.
+    const dir = await mkdtemp(path.join(tmpdir(), 'dbadmin-export-'));
+    await expect(
+      runExport({
+        connector: fakeConnector(),
+        format: 'csv',
+        sources: [users(), exploding('orders')],
+        destination: { kind: 'directory', path: dir, root: dir },
+        consistentSnapshot: false,
+        content: 'data',
+      }),
+    ).rejects.toThrow();
+
+    expect(await readdir(dir)).toContain('.dbadmin-incomplete');
+  });
+
+  it('leaves no marker behind on a clean export', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'dbadmin-export-'));
+    await runExport({
+      connector: fakeConnector(),
+      format: 'csv',
+      sources: [users(), orders()],
+      destination: { kind: 'directory', path: dir, root: dir },
+      consistentSnapshot: false,
+      content: 'data',
+    });
+    expect(await readdir(dir)).not.toContain('.dbadmin-incomplete');
+  });
+
+  it('wraps each per-table SQL file in its own transaction', async () => {
+    // Only the single-file branch wrote the prelude/postlude, so a per-table SQL
+    // export produced bare INSERTs: a restore failing halfway through one file
+    // left that table partly loaded.
+    const dir = await mkdtemp(path.join(tmpdir(), 'dbadmin-export-'));
+    await runExport({
+      connector: fakeConnector(),
+      format: 'sql',
+      sources: [users(), orders()],
+      destination: { kind: 'directory', path: dir, root: dir },
+      consistentSnapshot: false,
+      content: 'data',
+    });
+
+    const sql = await readFile(path.join(dir, 'users.sql'), 'utf8');
+    expect(sql).toContain('BEGIN;');
+    expect(sql).toContain('COMMIT;');
+    expect(sql).toContain('INSERT INTO "users"');
+    expect(sql).not.toContain('INSERT INTO "orders"');
+  });
+
   it('writes one CSV per table', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'dbadmin-export-'));
     const result = await runExport({

@@ -50,25 +50,58 @@ export interface ZipOptions {
 export async function createZipArchive(out: Writable, options: ZipOptions = {}): Promise<ZipArchive> {
   const archiver = ((await import('archiver')) as unknown as { default: typeof archiverNs }).default;
   const archive = archiver('zip', { zlib: { level: options.level ?? 6 } });
+
+  // When a source fails the export loop destroys that entry's stream, and an
+  // 'error' event with no listener is an uncaught exception — one bad table in a
+  // fifty-table download took the whole server process down instead of
+  // truncating that one response.
+  //
+  // BOTH emitters need covering. archiver re-emits an entry's error on itself,
+  // but only once it has dequeued that entry and attached its own listener; an
+  // entry destroyed while still queued emits with nothing listening at all. The
+  // queue then never fires the append callback either, so a `finalize()` waiting
+  // on 'end' hangs for ever — hence the race below rather than a bare await.
+  let failure: Error | null = null;
+  let signalFailure: (err: Error) => void = () => undefined;
+  const failed = new Promise<never>((_, reject) => {
+    signalFailure = (err: Error) => {
+      failure ??= err;
+      reject(err);
+    };
+  });
+  // The race may settle on the success side, leaving this rejection unclaimed;
+  // handling it here keeps that from surfacing as an unhandled rejection.
+  failed.catch(() => undefined);
+  archive.on('error', signalFailure);
+
   archive.pipe(out);
 
   return {
     entry(name: string): PassThrough {
       const stream = new PassThrough();
+      // Attached before `append`, so an entry destroyed while still queued is
+      // still heard.
+      stream.on('error', signalFailure);
       archive.append(stream, { name });
       return stream;
     },
 
     async finalize(): Promise<void> {
+      if (failure) throw failure;
       // `finalize()` resolves once the last entry is queued, not once the bytes
       // have left — waiting on 'end' too is what makes `bytesWritten()` final and
-      // stops the HTTP response closing mid-central-directory.
-      const ended = new Promise<void>((resolve, reject) => {
+      // stops the HTTP response closing mid-central-directory. Raced against the
+      // failure so a dead entry surfaces as a rejection rather than a hang.
+      const ended = new Promise<void>((resolve) => {
         archive.on('end', () => resolve());
-        archive.on('error', reject);
       });
-      await archive.finalize();
-      await ended;
+      await Promise.race([
+        (async () => {
+          await archive.finalize();
+          await ended;
+        })(),
+        failed,
+      ]);
     },
 
     bytesWritten(): number {

@@ -71,6 +71,38 @@ describe('createZipArchive', () => {
     expect(await read.file('big.csv')!.async('string')).toBe(body);
   });
 
+  it('surfaces a failure mid-archive instead of crashing the process', async () => {
+    // The export loop destroys the entry stream when a source fails (sink.abort
+    // → head.destroy → the whole chain). archiver re-emits that on itself, and
+    // an 'error' event with no listener is an uncaught exception, which takes
+    // the server down rather than truncating one download.
+    const out = new PassThrough();
+    out.resume();
+    const archive = await createZipArchive(out);
+    const entry = archive.entry('users.csv');
+    entry.destroy(new Error('table vanished mid-export'));
+
+    await expect(archive.finalize()).rejects.toThrow();
+  });
+
+  it('never finalizes an archive whose entry failed', async () => {
+    // A readable zip holding half the tables is the worst outcome: it looks
+    // like a complete backup. Truncated is recognisably broken.
+    const out = new PassThrough();
+    const chunks: Buffer[] = [];
+    out.on('data', (c: Buffer) => chunks.push(Buffer.from(c)));
+    const archive = await createZipArchive(out);
+    const entry = archive.entry('users.csv');
+    entry.end('id,email\n1,a@x.com\n');
+    await new Promise((r) => entry.on('close', r));
+    const broken = archive.entry('orders.csv');
+    broken.destroy(new Error('boom'));
+
+    await expect(archive.finalize()).rejects.toThrow();
+    // No central directory, so no unzip tool will read it as complete.
+    await expect(JSZip.loadAsync(Buffer.concat(chunks))).rejects.toThrow();
+  });
+
   it('reports the bytes it wrote', async () => {
     const out = new PassThrough();
     const done = collect(out);

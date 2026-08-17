@@ -337,8 +337,10 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
             : undefined,
         // The upsert key: without it the server cannot tell an update from an
         // insert, so it is asked for rather than guessed.
+        // Never for a bundle: these name columns in ONE table, and the server
+        // would apply them as the conflict key for every file in the folder.
         keyColumns:
-          needsKeys && keyColumns.trim() !== ''
+          kind !== 'bundle' && needsKeys && keyColumns.trim() !== ''
             ? keyColumns
                 .split(',')
                 .map((c) => c.trim())

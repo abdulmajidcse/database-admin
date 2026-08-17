@@ -92,6 +92,8 @@ export type ExportSource =
  */
 export type ExportDestination =
   | { kind: 'file'; path: string }
+  /** One file per table under `path` — a database scope in a per-file format (§7.1). */
+  | { kind: 'directory'; path: string }
   | { kind: 'download'; path: string; filename: string };
 
 export interface ExportJobParams {
