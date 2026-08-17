@@ -25,6 +25,7 @@ import { toast } from 'sonner';
 import {
   Braces,
   Copy,
+  DatabaseBackup,
   Download,
   FileCode,
   Network,
@@ -220,8 +221,14 @@ function openDiagram(target: ObjectTarget): void {
 // ---------------------------------------------------------------------------
 
 export type ObjectActionRequest =
-  | { type: 'export'; connectionId: string; schema?: string; table: string }
-  | { type: 'import'; connectionId: string; schema?: string; table: string };
+  /**
+   * Carries the whole §7.1 source, not just a table: a database node exports a
+   * database, and the request has to be able to say so. The built-in fallback
+   * below only knows how to download a table, so anything else simply waits for
+   * the wizard — which the shell always mounts (transfer/transfer-host.tsx).
+   */
+  | { type: 'export'; connectionId: string; source: ExportRequest['source'] }
+  | { type: 'import'; connectionId: string; target?: { schema?: string; table: string } };
 
 /** Return false to decline; anything else counts as "handled". */
 export type ObjectActionHandler = (request: ObjectActionRequest) => boolean | void;
@@ -631,6 +638,11 @@ export function ObjectContextMenu({ target, x, y, onClose, onRefresh }: ObjectCo
     const ref = objectRef(node);
     const list: MenuItem[] = [];
     const isData = DATA_KINDS.includes(node.kind);
+    // Redis roots are `kind: 'database'` as well (db0, db1…), but neither
+    // transfer verb exists for it: an export resolves through getSchema, which
+    // refuses ("redis has no SQL schema model"), and an import throws
+    // UNSUPPORTED_ENGINE. Same gate the ER-diagram entry already uses.
+    const dumpableEngine = !!target.connection && target.connection.engine !== 'redis';
 
     if (isData || node.kind === 'collection' || node.kind === 'key' || node.kind === 'column') {
       list.push({
@@ -681,40 +693,87 @@ export function ObjectContextMenu({ target, x, y, onClose, onRefresh }: ObjectCo
       run: () => copy(qualifiedFor(node), 'qualified name'),
     });
 
-    if (isData) {
+    // A Mongo collection is the document engine's table, and the export wizard
+    // models it as the `table` scope with the database in `schema` — so it gets
+    // the same entry rather than being the one object you cannot export.
+    const isExportable = isData || node.kind === 'collection';
+    if (isExportable) {
       list.push({
         id: 'export',
-        label: 'Export table…',
+        label: node.kind === 'collection' ? 'Export collection…' : 'Export table…',
         icon: <Download className="size-3.5" />,
         divider: true,
         run: () => {
           const request: ObjectActionRequest = {
             type: 'export',
             connectionId: target.connectionId,
-            schema: ref.schema,
-            table: ref.name,
+            source: { kind: 'table', schema: ref.schema, table: ref.name },
           };
           if (!dispatchObjectAction(request)) downloadTableCsv(target.connectionId, ref.schema, ref.name);
         },
       });
     }
 
-    // §8.5: a read-only connection is never offered a way to write to it.
-    if (node.kind === 'table' && !target.connection?.readOnly) {
+    // §7.1's database scope. Postgres is the only engine with a schema level, so
+    // a `schema` node exports its parent database — the scope the server
+    // understands — and the schema itself simply preselects nothing further.
+    if ((node.kind === 'database' || node.kind === 'schema') && dumpableEngine) {
+      const databaseName = node.kind === 'database' ? ref.name : (metaString(node, 'database') ?? ref.name);
       list.push({
-        id: 'import',
-        label: 'Import into table…',
-        icon: <Upload className="size-3.5" />,
+        id: 'export-database',
+        label: 'Export database…',
+        icon: <DatabaseBackup className="size-3.5" />,
+        divider: !isExportable,
         run: () => {
           const request: ObjectActionRequest = {
-            type: 'import',
+            type: 'export',
             connectionId: target.connectionId,
-            schema: ref.schema,
-            table: ref.name,
+            source: { kind: 'database', database: databaseName },
           };
-          if (!dispatchObjectAction(request)) setImporting(target);
+          if (!dispatchObjectAction(request)) {
+            toast.error('The export wizard is not available.');
+          }
         },
       });
+    }
+
+    // §8.5: a read-only connection is never offered a way to write to it.
+    if (!target.connection?.readOnly) {
+      if (node.kind === 'table' || node.kind === 'collection') {
+        list.push({
+          id: 'import',
+          label: node.kind === 'collection' ? 'Import into collection…' : 'Import into table…',
+          icon: <Upload className="size-3.5" />,
+          run: () => {
+            const request: ObjectActionRequest = {
+              type: 'import',
+              connectionId: target.connectionId,
+              target: { schema: ref.schema, table: ref.name },
+            };
+            if (!dispatchObjectAction(request)) setImporting(target);
+          },
+        });
+      }
+
+      // Restoring a dump or running a .sql script targets a database, not a
+      // table — the other half of §7.1's schema/database level.
+      if ((node.kind === 'database' || node.kind === 'schema') && dumpableEngine) {
+        list.push({
+          id: 'restore-database',
+          label: 'Restore into database…',
+          icon: <Upload className="size-3.5" />,
+          run: () => {
+            const request: ObjectActionRequest = {
+              type: 'import',
+              connectionId: target.connectionId,
+              target: undefined,
+            };
+            if (!dispatchObjectAction(request)) {
+              toast.error('The import wizard is not available.');
+            }
+          },
+        });
+      }
     }
 
     if (isData || node.kind === 'schema' || node.kind === 'database') {

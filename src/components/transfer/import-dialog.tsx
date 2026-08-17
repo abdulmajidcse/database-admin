@@ -171,14 +171,24 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
   );
 
   // --- preview (§7.4 "sniff delimiter, encoding and BOM; preview 50 rows") ---
+  // The NULL literal is part of the preview's query key, so an undebounced one
+  // would re-read the file on every keystroke.
+  const debouncedNullLiteral = useDebounced(nullLiteral, 300);
   const dialectBody = React.useMemo(() => {
     const d: Record<string, unknown> = {};
     if (edits.delimiter && edits.delimiter.length === 1) d.delimiter = edits.delimiter;
     if (edits.quote && edits.quote.length === 1) d.quote = edits.quote;
     if (edits.encoding) d.encoding = edits.encoding;
     if (edits.hasHeader !== undefined) d.hasHeader = edits.hasHeader;
-    return Object.keys(d).length > 0 ? d : undefined;
-  }, [edits]);
+    // Both of these ride along on the import (see `csv` in submit), and the
+    // server infers each column's type under them. Leaving them out here types
+    // the preview by different rules than the load: a file writing missing
+    // numbers as `NA` reads as text without the literal and as an integer with
+    // it — and the mapping is seeded from whichever answer the preview gave.
+    if (debouncedNullLiteral !== '') d.nullLiteral = debouncedNullLiteral;
+    d.trim = trim;
+    return d;
+  }, [edits, debouncedNullLiteral, trim]);
 
   const preview = useQuery<CsvPreviewResponse>({
     queryKey: ['csv-preview', path, JSON.stringify(dialectBody ?? {})],
@@ -216,6 +226,10 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
   // and re-match when the target column list finally lands. Hand edits survive
   // both unless the column shape itself changed.
   const targetKey = (targetColumns ?? []).join(',');
+  // A NULL-literal or trim change re-infers the types without changing the
+  // headers, so `headerKey` alone would never notice — and the mapping would
+  // keep the types inferred under the old rules.
+  const typesKey = (preview.data?.inferredTypes ?? []).join(',');
   React.useEffect(() => {
     if (headers.length === 0) return;
     const shapeChanged = shapeRef.current !== headerKey;
@@ -225,20 +239,37 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
       buildMappings({ headers, inferredTypes: preview.data?.inferredTypes, targetColumns, nullLiteral, trim }),
     );
     if (shapeChanged) setMappingTouched(false);
-    // `headerKey`/`targetKey` stand in for the arrays; nullLiteral and trim are
-    // deliberately absent — changing a default must not discard hand edits.
+    // `headerKey`/`targetKey`/`typesKey` stand in for the arrays; nullLiteral
+    // and trim are read but not depended on — they only ever reach here through
+    // a re-inferred `typesKey`, so a default change cannot discard hand edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [headerKey, targetKey]);
+  }, [headerKey, targetKey, typesKey]);
 
   const script = isScript(kind);
   const problems = validate({ connectionId, path, kind, tableName });
   const canAdvance = problems.length === 0;
 
+  // A CSV whose every column is unmapped starts a job that throws NO_MAPPING the
+  // moment it runs — which is exactly what a headerless file does, since the
+  // synthetic `column_1…column_N` headers match no real column name. It blocks
+  // submission only, never the Next button: the mapping screen is where it gets
+  // fixed, so stranding the user on step 1 would be worse than useless.
+  /** Both of these key a row before writing it; neither can guess the key. */
+  const needsKeys = onConflict === 'upsert' || onConflict === 'replace';
+  const unmapped = kind === 'csv' && mapping.length > 0 && mapping.every((m) => m.targetColumn === null);
+  const submitProblems = unmapped
+    ? [...problems, 'Map at least one column to a target column — nothing would be written.']
+    : problems;
+  const canSubmit = submitProblems.length === 0;
+
   const steps: Step[] = script ? ['source', 'options'] : ['source', 'mapping', 'options'];
   const stepIndex = Math.max(0, steps.indexOf(step));
+  // Shown from the mapping screen on, so the warning appears on the screen that
+  // can fix it as well as on the one that blocks on it.
+  const shownProblems = step === 'source' ? problems : submitProblems;
 
   async function submit(): Promise<void> {
-    if (!connectionId || problems.length > 0) return;
+    if (!connectionId || submitProblems.length > 0) return;
     setBusy(true);
     setError(null);
     try {
@@ -290,7 +321,7 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
         // The upsert key: without it the server cannot tell an update from an
         // insert, so it is asked for rather than guessed.
         keyColumns:
-          onConflict === 'upsert' && keyColumns.trim() !== ''
+          needsKeys && keyColumns.trim() !== ''
             ? keyColumns
                 .split(',')
                 .map((c) => c.trim())
@@ -344,7 +375,7 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
             <Button
               variant={dryRun ? 'default' : 'primary'}
               loading={busy}
-              disabled={!canAdvance}
+              disabled={!canSubmit}
               icon={dryRun ? <FlaskConical className="size-3.5" /> : <Upload className="size-3.5" />}
               onClick={() => void submit()}
             >
@@ -626,13 +657,22 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
                   <option value="ignore">Ignore — skip the duplicate</option>
                 </Select>
               </Field>
+              {/* `replace` needs a key exactly as much as `upsert` does — it is
+                  a delete keyed on the row followed by an insert — and the
+                  server's only fallback is the primary key. Leaving the box
+                  disabled here made "replace into a table with no primary key"
+                  unreachable from the UI: the job could only ever fail. */}
               <Field
                 label="Key columns"
-                hint={onConflict === 'upsert' ? 'Comma-separated. Defaults to the primary key.' : 'Upsert only.'}
+                hint={
+                  needsKeys
+                    ? 'Comma-separated. Defaults to the primary key.'
+                    : 'Upsert and replace only.'
+                }
               >
                 <Input
                   className="mono"
-                  disabled={onConflict !== 'upsert'}
+                  disabled={!needsKeys}
                   value={keyColumns}
                   placeholder="id"
                   onChange={(e) => setKeyColumns(e.target.value)}
@@ -700,9 +740,9 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
           </>
         )}
 
-        {problems.length > 0 && (
+        {shownProblems.length > 0 && (
           <ul className="list-inside list-disc text-[11px] text-[var(--warn)]">
-            {problems.map((p) => (
+            {shownProblems.map((p) => (
               <li key={p}>{p}</li>
             ))}
           </ul>
@@ -758,6 +798,16 @@ function PreviewTable({ preview }: { preview: CsvPreviewResponse }) {
       </table>
     </div>
   );
+}
+
+/** Trailing-edge debounce, so a fast typist costs one preview instead of six. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [settled, setSettled] = React.useState(value);
+  React.useEffect(() => {
+    const id = window.setTimeout(() => setSettled(value), ms);
+    return () => window.clearTimeout(id);
+  }, [value, ms]);
+  return settled;
 }
 
 function validate(state: { connectionId: string | null; path: string; kind: SourceKind; tableName: string }): string[] {

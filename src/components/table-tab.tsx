@@ -13,8 +13,9 @@
  */
 
 import * as React from 'react';
-import { RefreshCw } from 'lucide-react';
+import { Download, RefreshCw } from 'lucide-react';
 import { DataGrid } from './grid/data-grid';
+import { openExportDialog } from './transfer/transfer-host';
 import { FilterBar, EMPTY_FILTER_STATE, type GridFilterState } from './grid/filter-bar';
 import { Button, EmptyState, ErrorBox, Spinner } from './ui/primitives';
 import { DEFAULT_PAGE_SIZE, useTableData, type SortSpec } from '@/hooks/use-table-data';
@@ -115,13 +116,41 @@ export function TableTab({ tab }: { tab: WorkspaceTab }) {
         />
       }
       toolbarExtra={
-        <Button
-          size="xs"
-          variant="ghost"
-          icon={<RefreshCw className="size-3.5" />}
-          onClick={data.refetch}
-          title="Refresh"
-        />
+        <>
+          <Button
+            size="xs"
+            variant="ghost"
+            icon={<Download className="size-3.5" />}
+            disabled={!tab.connectionId || !saved.table}
+            onClick={() =>
+              openExportDialog({
+                connectionId: tab.connectionId,
+                source: {
+                  kind: 'table',
+                  schema: saved.schema,
+                  table: saved.table ?? '',
+                  // Only the raw box carries across: the chips are parameterized
+                  // server-side and there is no way to express a bound value in
+                  // the export request's plain WHERE text. The wizard shows this
+                  // field, so what will be exported is on screen either way.
+                  where: filter.where.trim() === '' ? undefined : filter.where,
+                },
+              })
+            }
+            title={
+              filter.filters.length > 0
+                ? 'Export this table. The filter chips do not carry over — add them to the WHERE box in the wizard.'
+                : 'Export this table'
+            }
+          />
+          <Button
+            size="xs"
+            variant="ghost"
+            icon={<RefreshCw className="size-3.5" />}
+            onClick={data.refetch}
+            title="Refresh"
+          />
+        </>
       }
       onApplied={() => data.refetch()}
     />

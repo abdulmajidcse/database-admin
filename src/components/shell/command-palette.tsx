@@ -24,13 +24,16 @@ import {
   RefreshCw,
   Sun,
   Table2,
+  Upload,
+  Wrench,
 } from 'lucide-react';
 import { api } from '../../lib/api-client';
 import type { SchemaResponse } from '../../lib/api-types';
 import { allTables, qualifiedName } from '../../lib/schema-model';
 import { ENGINE_LABELS } from '../../lib/connection';
-import { emitWorkspaceCommand, useWorkspaceStore } from '../../state/workspace-store';
+import { emitWorkspaceCommand, useActiveTab, useWorkspaceStore } from '../../state/workspace-store';
 import { cn } from '../ui/primitives';
+import { openExportDialog, openImportDialog, openNativeToolsDialog } from '../transfer/transfer-host';
 import { connectConnection, EngineIcon, openConnectionEditor, useConnections } from './connection-sidebar';
 import { ACCOUNT_QUERY_KEY, signOut } from './auth-gate';
 import { setThemeMode } from './theme';
@@ -51,6 +54,7 @@ export function CommandPalette() {
 
   const connections = useConnections();
   const activeConnectionId = useWorkspaceStore((s) => s.activeConnectionId);
+  const activeTab = useActiveTab();
   const setActiveConnection = useWorkspaceStore((s) => s.setActiveConnection);
   const openTab = useWorkspaceStore((s) => s.openTab);
   const setBottomTab = useWorkspaceStore((s) => s.setBottomTab);
@@ -184,14 +188,47 @@ export function CommandPalette() {
                 Open table…
               </Item>
               <Item
-                value="export result csv json"
+                value="export result table database csv json sql dump"
                 icon={<Download className="size-3.5" />}
+                detail="Result, table, database or server"
+                // Gate on the connection the handler will actually dispatch to:
+                // a SQL tab exports through its own connection, which is not
+                // necessarily the sidebar's selection.
+                disabled={!(activeTab?.kind === 'sql' ? activeTab.connectionId : activeConnectionId)}
                 onSelect={() => {
                   close();
-                  emitWorkspaceCommand('export');
+                  // A SQL tab owns the statement behind its current result, so
+                  // it opens the wizard itself with that preselected. Anywhere
+                  // else — a grid tab, a Mongo workspace, no tab at all — there
+                  // is no statement and nothing listening, so open it directly.
+                  if (activeTab?.kind === 'sql') emitWorkspaceCommand('export');
+                  else openExportDialog({ connectionId: activeConnectionId });
                 }}
               >
                 Export…
+              </Item>
+              <Item
+                value="import load csv restore dump sql script"
+                icon={<Upload className="size-3.5" />}
+                detail="CSV, JSON, a .sql script or a dump"
+                disabled={!activeConnectionId}
+                onSelect={() => {
+                  close();
+                  openImportDialog({ connectionId: activeConnectionId });
+                }}
+              >
+                Import…
+              </Item>
+              <Item
+                value="native tools mysqldump pg_dump mongodump versions"
+                icon={<Wrench className="size-3.5" />}
+                detail="Which dump binaries are bundled, and their versions"
+                onSelect={() => {
+                  close();
+                  openNativeToolsDialog(activeConnection?.engine ?? null);
+                }}
+              >
+                Dump and restore tools…
               </Item>
             </Group>
 
