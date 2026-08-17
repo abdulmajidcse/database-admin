@@ -126,7 +126,7 @@ export interface FilePickerProps {
   /** Offer a switcher when a flow legitimately reads from either root. */
   roots?: FileRootKey[];
   /** `save` adds a filename field and returns directory + name. */
-  mode?: 'open' | 'save';
+  mode?: 'open' | 'save' | 'directory';
   /** Extension filter, e.g. ['.csv', '.tsv']. Directories are always listed. */
   extensions?: string[];
   /** Pre-filled filename in `save` mode. */
@@ -336,6 +336,21 @@ export function FilePicker({
               <TriangleAlert className="size-3" /> This directory is not writable by the server.
             </span>
           )}
+          {mode === 'directory' && data && (
+            // Clicking a folder navigates into it, so choosing one needs its own
+            // action — otherwise the directory you are standing in is the one
+            // thing the picker cannot return.
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => {
+                onPick(data.path);
+                onClose();
+              }}
+            >
+              Use this folder
+            </Button>
+          )}
         </div>
 
         {mode === 'save' && (
@@ -462,7 +477,7 @@ export function FilePathField({
   onChange: (path: string) => void;
   root?: FileRootKey;
   roots?: FileRootKey[];
-  mode?: 'open' | 'save';
+  mode?: 'open' | 'save' | 'directory';
   extensions?: string[];
   defaultName?: string;
   placeholder?: string;

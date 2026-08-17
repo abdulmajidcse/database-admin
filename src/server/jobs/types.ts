@@ -104,7 +104,9 @@ export interface ExportJobParams {
 
 export interface ImportJobParams {
   kind: 'import';
-  source: { kind: 'csv' | 'json' | 'ndjson'; path: string; encoding?: string };
+  /** `bundle` is a directory loaded as one table per file (§7.1). */
+  source: { kind: 'csv' | 'json' | 'ndjson' | 'bundle'; path: string; encoding?: string };
+  /** A bundle leaves `table` empty and takes each table name from a filename. */
   target: { schema?: string; table: string; createTable?: boolean };
   /** Per-column mapping from the CSV wizard (§7.4). */
   mapping?: ColumnMapping[];

@@ -98,6 +98,8 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
   const [toFile, setToFile] = React.useState(false);
   const [path, setPath] = React.useState('');
   const [touchedPath, setTouchedPath] = React.useState(false);
+  /** One file per table — a directory on the server, a .zip in the browser. */
+  const [perTable, setPerTable] = React.useState(false);
 
   // --- options (§7.4) -----------------------------------------------------
   const [gzip, setGzip] = React.useState(false);
@@ -139,6 +141,7 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
     setWhere('');
     setDatabase('');
     setPath('');
+    setPerTable(false);
     setFormat(defaultFormat ?? 'csv');
     // Connection-dependent, so they cannot carry across a change of target.
     setRemoteSide(false);
@@ -179,6 +182,23 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
   const nativeTools = useNativeTools(open && advanced);
   const missingTools = missingDumpTools(engine, nativeTools.data?.tools);
 
+  // A database or server scope fans out into one source per table, so the
+  // question "can this format hold them all in one file?" starts to matter.
+  const manyTables = scope === 'database' || scope === 'server';
+  // SQL concatenates into one script and XLSX opens one sheet per table. The
+  // delimited formats carry a single header and a single column shape, and JSON
+  // would need a document per table, so for those the only coherent answer is a
+  // file each.
+  const oneTablePerFile = format === 'csv' || format === 'tsv' || format === 'json';
+  const mustSplit = manyTables && oneTablePerFile;
+
+  // Turn the split on by itself the moment it becomes the only valid shape, so
+  // picking CSV for a whole database configures a working export instead of an
+  // error the user has to read and undo.
+  React.useEffect(() => {
+    if (mustSplit) setPerTable(true);
+  }, [mustSplit]);
+
   const source = React.useMemo((): ExportRequest['source'] => {
     switch (scope) {
       case 'query':
@@ -206,11 +226,13 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
     [source, format, gzip],
   );
 
-  // Keep the destination in step with the format until the user edits it.
+  // Keep the destination in step with the format until the user edits it. With
+  // the split on the destination is a directory, and a suggested `users.csv`
+  // there would name the folder after one arbitrary table.
   React.useEffect(() => {
     if (!open || !toFile || touchedPath) return;
-    setPath(suggestedName);
-  }, [open, toFile, touchedPath, suggestedName]);
+    setPath(perTable ? '' : suggestedName);
+  }, [open, toFile, touchedPath, suggestedName, perTable]);
 
   const sqlFormat = format === 'sql';
   const delimited = DELIMITED.has(format);
@@ -229,6 +251,7 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
     format,
     documentEngine,
     schemaName,
+    perTable,
   });
 
   async function submit(): Promise<void> {
@@ -258,7 +281,9 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
       connectionId,
       source,
       format,
-      destination: toFile ? { kind: 'file', path } : { kind: 'download' },
+      destination: toFile
+        ? { kind: perTable ? 'directory' : 'file', path }
+        : { kind: 'download', archive: perTable || undefined },
       options,
     };
 
@@ -451,9 +476,33 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
           </Field>
         </div>
 
+        {manyTables && (
+          <Field
+            label="Layout"
+            hint={
+              mustSplit
+                ? `One ${format.toUpperCase()} file holds one table, so every table gets its own.`
+                : 'Off means every table goes into one file.'
+            }
+          >
+            <Checkbox
+              checked={perTable}
+              // Not merely pre-ticked: for these formats the combined file is
+              // the broken one, so the box is the only valid setting.
+              disabled={mustSplit}
+              onChange={(e) => setPerTable(e.target.checked)}
+              label={
+                toFile
+                  ? 'One file per table, written into a directory'
+                  : 'One file per table, downloaded as a .zip'
+              }
+            />
+          </Field>
+        )}
+
         {toFile ? (
           <Field
-            label="Export file"
+            label={perTable ? 'Export directory' : 'Export file'}
             hint="A container path inside the export root — Browse shows which host directory that is."
           >
             <FilePathField
@@ -463,10 +512,12 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
                 setPath(p);
               }}
               root="export"
-              mode="save"
-              defaultName={suggestedName}
-              placeholder={suggestedName}
-              pickerTitle="Choose where to write the export"
+              // One file per table needs the directory they go into, not a
+              // filename — the engine names each file after its table.
+              mode={perTable ? 'directory' : 'save'}
+              defaultName={perTable ? undefined : suggestedName}
+              placeholder={perTable ? '/data/exports/my-database' : suggestedName}
+              pickerTitle={perTable ? 'Choose a folder for the exported tables' : 'Choose where to write the export'}
             />
           </Field>
         ) : (
@@ -742,6 +793,7 @@ function validate(state: {
   format: ExportFormat;
   documentEngine: boolean;
   schemaName: string;
+  perTable: boolean;
 }): string[] {
   const out: string[] = [];
   if (!state.connectionId) out.push('Pick a connection first.');
@@ -753,10 +805,16 @@ function validate(state: {
   if (state.documentEngine && state.scope === 'table' && state.schemaName.trim() === '') {
     out.push('Name the MongoDB database the collection lives in.');
   }
-  // runExport refuses this: concatenated JSON arrays are not a JSON document,
-  // and neither route ever uses a directory destination.
-  if (state.format === 'json' && (state.scope === 'database' || state.scope === 'server')) {
-    out.push('A JSON export covers one table or query at a time — use NDJSON for a whole database.');
+  // runExport refuses a combined file for these formats — a second header (or a
+  // second JSON array) mid-file is unreadable. With the split on, each table
+  // gets its own file and the export is fine, so this only fires without it.
+  const manyTables = state.scope === 'database' || state.scope === 'server';
+  const oneTablePerFile = state.format === 'csv' || state.format === 'tsv' || state.format === 'json';
+  if (manyTables && oneTablePerFile && !state.perTable) {
+    out.push(
+      `A ${state.format.toUpperCase()} file holds one table. Turn on "one file per table", ` +
+        'or export as SQL or XLSX to get every table in a single file.',
+    );
   }
   return out;
 }

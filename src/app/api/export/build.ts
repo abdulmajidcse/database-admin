@@ -107,8 +107,13 @@ function parseSource(raw: unknown): ApiExportRequest['source'] {
 
 function parseDestination(raw: unknown): ApiExportRequest['destination'] {
   const d = asRecord(raw, '"destination"');
-  const kind = oneOf(d.kind, ['file', 'download'] as const, 'destination.kind');
-  if (kind === 'download') return { kind };
+  const kind = oneOf(d.kind, ['file', 'directory', 'download'] as const, 'destination.kind');
+  if (kind === 'download') {
+    // `archive` turns the response into a zip holding one file per table — the
+    // only coherent way to download a fifty-table CSV export (§7.1).
+    const archive = optionalBoolean(d, 'archive');
+    return archive === undefined ? { kind } : { kind, archive };
+  }
   const requested = requireString(d, 'path', 'destination path');
   // Confined here as well as in the pipeline so a bad path is a 400 the form can
   // show, not a job that fails a second later (§7.2).
@@ -381,9 +386,14 @@ function safeStem(label: string): string {
 }
 
 /** `orders-2026-08-10T14-05-33.csv.gz` — sorted, unique, and obviously ours. */
-export function downloadFilename(req: ApiExportRequest): string {
+export function downloadFilename(req: ApiExportRequest, asArchive = false): string {
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:]/g, '-');
-  return `${safeStem(stemFor(req))}-${stamp}.${fileExtension(req.format, req.options.compression ?? 'none')}`;
+  // The archive's own extension, not the entries': naming a zip `.csv` makes
+  // every desktop OS open it with the wrong application.
+  const ext = asArchive
+    ? 'zip'
+    : fileExtension(req.format, req.options.compression ?? 'none');
+  return `${safeStem(stemFor(req))}-${stamp}.${ext}`;
 }
 
 /**
@@ -421,6 +431,9 @@ function jobSource(req: ApiExportRequest): JobExportSource {
  */
 export function startExportJob(req: ApiExportRequest, path: string): string {
   const absolute = resolveExportTarget(path);
+  // A directory destination writes one file per table into `absolute` (§7.1);
+  // a file destination writes every table into that one file.
+  const perTable = req.destination.kind === 'directory';
   const params: ExportJobParams = {
     kind: 'export',
     source: jobSource(req),
@@ -428,7 +441,9 @@ export function startExportJob(req: ApiExportRequest, path: string): string {
     destination: { kind: 'file', path: absolute },
     options: req.options,
   };
-  const title = `Export ${stemFor(req)} → ${absolute}`;
+  const title = perTable
+    ? `Export ${stemFor(req)} → ${absolute}/ (one file per table)`
+    : `Export ${stemFor(req)} → ${absolute}`;
 
   const job = jobManager.create('export', title, req.connectionId, params, async (ctx) => {
     ctx.progress({ phase: 'planning' });
@@ -441,7 +456,10 @@ export function startExportJob(req: ApiExportRequest, path: string): string {
     // the fallback below. A native run that *fails* still throws, so a broken
     // dump is never mistaken for a good one. JobContext satisfies ToolContext
     // structurally, so cancel reaches the child process unchanged.
-    const config = connectionsRepo.get(req.connectionId);
+    // Native tools emit one dump file, so they cannot serve a per-table request:
+    // pointing pg_dump at `absolute` would write a single file where the user
+    // asked for a directory of them. The built-in engine handles this scope.
+    const config = perTable ? null : connectionsRepo.get(req.connectionId);
     if (config) {
       const outcome = await nativeDump(
         config,
@@ -469,7 +487,7 @@ export function startExportJob(req: ApiExportRequest, path: string): string {
     ctx.log(`Exporting ${sources.length} source(s) as ${req.format} to ${absolute}`);
     const result = await runExport(
       engineRequest(connector, req, sources, {
-        kind: 'file',
+        kind: perTable ? 'directory' : 'file',
         path: absolute,
         root: CONFIG.exportRoot,
         overwrite: true,
@@ -529,9 +547,20 @@ export async function streamExportResponse(
   produced.on('end', () => markStarted());
   produced.on('error', (err: Error) => body.destroy(err));
 
-  const run = runExport(engineRequest(connector, req, sources, { kind: 'stream', stream: produced, end: true }), {
-    signal,
-  });
+  // A zip download is the only coherent shape for many tables in a format that
+  // holds one table per file; the engine writes one entry per source into it.
+  const asArchive = req.destination.kind === 'download' && req.destination.archive === true;
+  const run = runExport(
+    engineRequest(
+      connector,
+      req,
+      sources,
+      asArchive
+        ? { kind: 'archive', stream: produced }
+        : { kind: 'stream', stream: produced, end: true },
+    ),
+    { signal },
+  );
 
   const failed = run.then(
     () => undefined,
@@ -552,8 +581,10 @@ export async function streamExportResponse(
   return new Response(Readable.toWeb(body) as unknown as ReadableStream<Uint8Array>, {
     status: 200,
     headers: {
-      'content-type': contentTypeFor(req.format, req.options.compression ?? 'none'),
-      'content-disposition': contentDisposition(downloadFilename(req)),
+      'content-type': asArchive
+        ? 'application/zip'
+        : contentTypeFor(req.format, req.options.compression ?? 'none'),
+      'content-disposition': contentDisposition(downloadFilename(req, asArchive)),
       'cache-control': 'no-store',
       // The length is unknowable up front; say so rather than letting a proxy guess.
       'x-content-type-options': 'nosniff',

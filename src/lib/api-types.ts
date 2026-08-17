@@ -258,7 +258,12 @@ export interface ExportRequest {
     | { kind: 'database'; database: string; tables?: string[] }
     | { kind: 'server' };
   format: ExportFormat;
-  destination: { kind: 'file'; path: string } | { kind: 'download' };
+  destination:
+    | { kind: 'file'; path: string }
+    /** One file per table under `path` — CSV cannot hold a database in one file. */
+    | { kind: 'directory'; path: string }
+    /** `archive` wraps the same one-file-per-table set into a single .zip. */
+    | { kind: 'download'; archive?: boolean };
   options: ExportOptions;
 }
 
@@ -280,7 +285,12 @@ export interface ExportOptions {
 
 export interface ImportRequest {
   connectionId: string;
-  source: { kind: 'csv' | 'json' | 'ndjson' | 'sql' | 'dump'; path: string };
+  /**
+   * `bundle` is a *directory* of CSV/TSV files loaded as one table each — the
+   * mirror of a directory export, and the only way a format holding one table
+   * per file can restore a whole database.
+   */
+  source: { kind: 'csv' | 'json' | 'ndjson' | 'sql' | 'dump' | 'bundle'; path: string };
   target?: { schema?: string; table: string; createTable?: boolean };
   mapping?: ColumnMapping[];
   options: ImportOptions;

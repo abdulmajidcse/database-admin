@@ -45,7 +45,7 @@ import { FilePathField, baseName } from './file-picker';
 import { CsvMapping, buildMappings } from './csv-mapping';
 import { openJobsDrawer } from './jobs-drawer';
 
-type SourceKind = 'csv' | 'json' | 'ndjson' | 'sql' | 'dump';
+type SourceKind = 'csv' | 'json' | 'ndjson' | 'sql' | 'dump' | 'bundle';
 type Step = 'source' | 'mapping' | 'options';
 
 const SOURCE_KINDS: { id: SourceKind; label: string }[] = [
@@ -54,6 +54,7 @@ const SOURCE_KINDS: { id: SourceKind; label: string }[] = [
   { id: 'ndjson', label: 'NDJSON (one document per line)' },
   { id: 'sql', label: 'SQL script' },
   { id: 'dump', label: 'Database dump (pg_dump / mysqldump)' },
+  { id: 'bundle', label: 'Folder of CSVs — one table per file' },
 ];
 
 /** Encodings /api/csv/preview accepts; a sniffed value outside this list is kept. */
@@ -70,6 +71,16 @@ const DELIMITER_PRESETS: { value: string; label: string }[] = [
 /** Row sources need a target table; a script carries its own targets. */
 function isScript(kind: SourceKind): boolean {
   return kind === 'sql' || kind === 'dump';
+}
+
+/**
+ * Sources that name their own tables, so the wizard must not ask for one: a
+ * script names them in its SQL, a bundle takes one per file from the filenames.
+ * Both also skip the mapping step — a bundle derives a mapping per file, since a
+ * single mapping could only ever fit one of the files in it.
+ */
+function namesOwnTargets(kind: SourceKind): boolean {
+  return isScript(kind) || kind === 'bundle';
 }
 
 function kindFromPath(path: string): SourceKind {
@@ -246,6 +257,8 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
   }, [headerKey, targetKey, typesKey]);
 
   const script = isScript(kind);
+  /** Drives the step list and the "which table?" fields, not the wording. */
+  const selfTargeting = namesOwnTargets(kind);
   const problems = validate({ connectionId, path, kind, tableName });
   const canAdvance = problems.length === 0;
 
@@ -262,7 +275,7 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
     : problems;
   const canSubmit = submitProblems.length === 0;
 
-  const steps: Step[] = script ? ['source', 'options'] : ['source', 'mapping', 'options'];
+  const steps: Step[] = selfTargeting ? ['source', 'options'] : ['source', 'mapping', 'options'];
   const stepIndex = Math.max(0, steps.indexOf(step));
   // Shown from the mapping screen on, so the warning appears on the screen that
   // can fix it as well as on the one that blocks on it.
@@ -285,11 +298,15 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
           ? db === ''
             ? undefined
             : { schema: db, table: db }
-          : {
-              schema: db === '' ? undefined : db,
-              table: tableName.trim(),
-              createTable,
-            },
+          : kind === 'bundle'
+            ? // No table name: each file in the folder supplies its own, and
+              // sending one here would apply it to every file.
+              { schema: db === '' ? undefined : db, table: '', createTable }
+            : {
+                schema: db === '' ? undefined : db,
+                table: tableName.trim(),
+                createTable,
+              },
         // `sourceName` must be a non-empty string server-side; a headerless or
         // blank column still needs a stable name, and `sourceIndex` is what the
         // loader actually matches on.
@@ -389,7 +406,7 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
         {step === 'source' && (
           <>
             <Field
-              label="File"
+              label={kind === 'bundle' ? 'Folder' : 'File'}
               hint="Container paths, confined to the export and SQLite directories — Browse shows the host directory each maps to."
             >
               <FilePathField
@@ -397,9 +414,9 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
                 onChange={onPathChange}
                 root="export"
                 roots={['export', 'sqlite']}
-                mode="open"
-                placeholder="/data/exports/orders.csv"
-                pickerTitle="Choose a file to import"
+                mode={kind === 'bundle' ? 'directory' : 'open'}
+                placeholder={kind === 'bundle' ? '/data/exports/my-database' : '/data/exports/orders.csv'}
+                pickerTitle={kind === 'bundle' ? 'Choose a folder of CSVs' : 'Choose a file to import'}
               />
             </Field>
 
@@ -419,7 +436,7 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
                   ))}
                 </Select>
               </Field>
-              {!script && (
+              {!selfTargeting && (
                 <>
                   <Field label="Target schema" hint="Optional">
                     <Input className="mono" value={schemaName} onChange={(e) => setSchemaName(e.target.value)} />
@@ -436,18 +453,39 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
                   </Field>
                 </>
               )}
-              {script && (
-                <Field label="Target database" hint="Optional — the script may name its own.">
+              {selfTargeting && (
+                <Field
+                  label={script ? 'Target database' : 'Target schema'}
+                  hint={
+                    script
+                      ? 'Optional — the script may name its own.'
+                      : 'Optional — each file loads into the table its name gives.'
+                  }
+                >
                   <Input className="mono" value={schemaName} onChange={(e) => setSchemaName(e.target.value)} />
                 </Field>
               )}
             </div>
 
+            {kind === 'bundle' && (
+              <p className="border border-[var(--border)] bg-[var(--bg-subtle)] px-2 py-1.5 text-[11px] leading-snug text-[var(--fg-muted)]">
+                Every <code className="mono">.csv</code> and <code className="mono">.tsv</code> in the folder is loaded
+                into the table its filename names — <code className="mono">users.csv</code> into{' '}
+                <code className="mono">users</code> — each with its own sniffed dialect and its own derived mapping.
+                Files load in name order. A downloaded <code className="mono">.zip</code> has to be unpacked into the
+                import root first.
+              </p>
+            )}
+
             {!script && (
               <Checkbox
                 checked={createTable}
                 onChange={(e) => setCreateTable(e.target.checked)}
-                label="Create the table if it does not exist (types come from the mapping screen)"
+                label={
+                  kind === 'bundle'
+                    ? 'Create each table if it does not exist (types are inferred per file)'
+                    : 'Create the table if it does not exist (types come from the mapping screen)'
+                }
               />
             )}
 
@@ -814,6 +852,7 @@ function validate(state: { connectionId: string | null; path: string; kind: Sour
   const out: string[] = [];
   if (!state.connectionId) out.push('Pick a connection first.');
   if (state.path.trim() === '') out.push('Choose a file to import.');
-  if (!isScript(state.kind) && state.tableName.trim() === '') out.push('Name the target table.');
+  // A bundle names a table per file, so an empty box is correct there.
+  if (!namesOwnTargets(state.kind) && state.tableName.trim() === '') out.push('Name the target table.');
   return out;
 }

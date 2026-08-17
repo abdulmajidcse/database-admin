@@ -20,6 +20,7 @@
 
 import { createReadStream, readFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
 import { Client as PgClient } from 'pg';
@@ -79,6 +80,7 @@ import {
   type OnConflict,
 } from './fastpath';
 import { runSqlScript, type ScriptError, type ScriptExecutor, type ScriptResult } from './dump-runner';
+import { bundleMembers } from './bundle';
 
 // ---------------------------------------------------------------------------
 // Job contract
@@ -245,11 +247,104 @@ export async function runImport(params: ImportParams, ctx: JobRunnerContext): Pr
     if (isScript) {
       return await runScriptImport(params, options, config, target, file, fileSize, ctx, startedAt, warnings);
     }
+    if (params.source.kind === 'bundle') {
+      return await runBundleImport(params, options, config, target, file, ctx, startedAt, warnings);
+    }
     return await runRowImport(params, options, config, target, file, fileSize, ctx, startedAt, warnings);
   } finally {
     await target.close().catch(() => undefined);
     await resolved.release().catch(() => undefined);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Bundle imports (a directory of CSV/TSV files → many tables)
+// ---------------------------------------------------------------------------
+
+/**
+ * Load every delimited file in a directory into the table its name implies —
+ * the import half of the §7.1 database scope, and the mirror of the directory
+ * export.
+ *
+ * Each member is a full row import in its own right: its own sniffed dialect,
+ * its own mapping derived from its own header, its own optional CREATE TABLE.
+ * That is what makes fifty heterogeneous files loadable in one action; a shared
+ * mapping could only ever describe one of them.
+ *
+ * The members run in sequence rather than in parallel. They share one target
+ * connection, and a bundle written by an export is exactly the case where
+ * foreign keys point across the files in it — a defined order is recoverable,
+ * an interleaved one is not.
+ */
+async function runBundleImport(
+  params: ImportParams,
+  options: ImportOptions,
+  config: ConnectionConfig,
+  target: Target,
+  dir: string,
+  ctx: JobRunnerContext,
+  startedAt: number,
+  warnings: string[],
+): Promise<ImportReport> {
+  const members = await bundleMembers(dir);
+  ctx.log(`Bundle: ${members.length} file(s) → ${members.map((m) => m.table).join(', ')}`);
+  ctx.progress({ phase: 'starting', tablesTotal: members.length, tablesDone: 0 });
+
+  const reports: ImportReport[] = [];
+  for (const [index, member] of members.entries()) {
+    const name = basename(member.path);
+    ctx.log(`[${index + 1}/${members.length}] ${name} → ${member.table}`);
+    const size = (await stat(member.path)).size;
+
+    const memberParams: ImportParams = {
+      ...params,
+      // Each file is an ordinary CSV import; `mapping: []` is what makes
+      // runRowImport derive one from *this* file's header rather than reusing a
+      // mapping that belongs to a different table.
+      source: { kind: 'csv', path: member.path },
+      target: { ...params.target, table: member.table },
+      mapping: [],
+    };
+
+    reports.push(
+      await runRowImport(memberParams, options, config, target, member.path, size, ctx, startedAt, warnings),
+    );
+    ctx.progress({ phase: 'importing', tablesTotal: members.length, tablesDone: index + 1 });
+  }
+
+  return mergeBundleReports(params, config, members.length, reports, startedAt, warnings);
+}
+
+/** One report for the whole bundle: totals across members, errors concatenated. */
+function mergeBundleReports(
+  params: ImportParams,
+  config: ConnectionConfig,
+  memberCount: number,
+  reports: ImportReport[],
+  startedAt: number,
+  warnings: string[],
+): ImportReport {
+  const sum = (pick: (r: ImportReport) => number): number => reports.reduce((n, r) => n + pick(r), 0);
+  return {
+    connectionId: params.connectionId,
+    engine: config.engine,
+    source: 'bundle',
+    target: `${memberCount} table(s): ${reports.map((r) => r.target ?? '?').join(', ')}`,
+    dryRun: reports.every((r) => r.dryRun),
+    // The members all take the same path for the same engine, so reporting the
+    // first is accurate rather than a guess.
+    fastPath: reports[0]?.fastPath ?? 'none',
+    rowsRead: sum((r) => r.rowsRead),
+    rowsWritten: sum((r) => r.rowsWritten),
+    rowsSkipped: sum((r) => r.rowsSkipped),
+    bytesProcessed: sum((r) => r.bytesProcessed),
+    batches: sum((r) => r.batches),
+    truncated: reports.some((r) => r.truncated),
+    foreignKeysDisabled: reports.some((r) => r.foreignKeysDisabled),
+    durationMs: Date.now() - startedAt,
+    errors: reports.flatMap((r) => r.errors),
+    warnings,
+  };
 }
 
 // ---------------------------------------------------------------------------
