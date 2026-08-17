@@ -119,6 +119,13 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
   const [error, setError] = React.useState<{ message: string; hint?: string } | null>(null);
 
   // Reset to whatever the caller preselected each time the dialog opens.
+  //
+  // Every field that *identifies the object* is cleared unconditionally, not
+  // just reassigned when the caller supplies one. One instance of this dialog
+  // serves the tree, the grid, the editor and the palette (see transfer-host),
+  // so a partial reset means right-clicking `public.orders` → Export → Cancel,
+  // then opening Export from the palette, offers to export `orders` again —
+  // with the previous destination path still in the box.
   React.useEffect(() => {
     if (!open) return;
     setError(null);
@@ -126,6 +133,16 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
     setTouchedPath(false);
     setChooseTables(false);
     setPickedTables([]);
+    setStatement('');
+    setSchemaName('');
+    setTableName('');
+    setWhere('');
+    setDatabase('');
+    setPath('');
+    setFormat(defaultFormat ?? 'csv');
+    // Connection-dependent, so they cannot carry across a change of target.
+    setRemoteSide(false);
+    setUseNativeTool(false);
     const src = initialSource ?? (sql && sql.trim() !== '' ? ({ kind: 'query', sql } as const) : null);
     if (src) {
       setScope(src.kind);
@@ -195,11 +212,24 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
     setPath(suggestedName);
   }, [open, toFile, touchedPath, suggestedName]);
 
-  const problems = validate({ connectionId, scope, statement, tableName, database, toFile, path });
   const sqlFormat = format === 'sql';
   const delimited = DELIMITED.has(format);
   const headered = HEADERED.has(format);
   const documentEngine = engine === 'mongodb';
+  /** An emptied box means "the default for this format", never "no separator". */
+  const effectiveDelimiter = delimiter === '' ? (format === 'tsv' ? '\t' : ',') : delimiter;
+  const problems = validate({
+    connectionId,
+    scope,
+    statement,
+    tableName,
+    database,
+    toFile,
+    path,
+    format,
+    documentEngine,
+    schemaName,
+  });
 
   async function submit(): Promise<void> {
     if (!connectionId || problems.length > 0) return;
@@ -209,13 +239,19 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
       structure: sqlFormat ? structure : 'both',
       binaryEncoding,
       nullLiteral,
-      delimiter: delimited ? delimiter : undefined,
+      // `''` is not nullish, so it would survive the writer's `?? ','` default
+      // and configure csv-stringify with a zero-length separator — every row
+      // written as `1JohnActive`, a green job, and an unparseable file.
+      delimiter: delimited ? effectiveDelimiter : undefined,
       header: headered ? header : undefined,
       batchSize: parsePositive(batchSize),
-      useNativeTool: useNativeTool || undefined,
-      remoteSide: remoteSide || undefined,
-      stripDefiner: isMysql(engine) ? stripDefiner : undefined,
-      pgFormat: engine === 'postgres' && sqlFormat ? pgFormat : undefined,
+      // Native delegation and the remote-side dump are job-only: the download
+      // path streams through the built-in engine and never calls `nativeDump`,
+      // so sending them here would promise fidelity the response cannot give.
+      useNativeTool: toFile ? useNativeTool || undefined : undefined,
+      remoteSide: toFile ? remoteSide || undefined : undefined,
+      stripDefiner: toFile && isMysql(engine) ? stripDefiner : undefined,
+      pgFormat: toFile && engine === 'postgres' && sqlFormat ? pgFormat : undefined,
     };
 
     const request: ExportRequest = {
@@ -229,7 +265,11 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
     if (!toFile) {
       // A form POST, not fetch(): the transfer belongs to the browser so the
       // export streams straight to disk without ever being buffered (§7.4).
-      downloadExport('/api/export/download', request);
+      // It answers into a hidden frame, so a refusal comes back here rather
+      // than navigating the app away — but it arrives after this closes.
+      downloadExport('/api/export/download', request, (message, hint) => {
+        toast.error('The export was refused', { description: hint ? `${message} ${hint}` : message });
+      });
       toast.success('Download started', { description: 'The browser will save the file as it streams in.' });
       onClose();
       return;
@@ -334,8 +374,18 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
               <Field label="Database">
                 <Input className="mono" value={database} onChange={(e) => setDatabase(e.target.value)} />
               </Field>
-              <Field label="Tables" hint="All tables unless you pick a subset.">
-                <Button size="sm" onClick={() => setChooseTables((v) => !v)}>
+              <Field
+                label={documentEngine ? 'Collections' : 'Tables'}
+                hint={
+                  documentEngine
+                    ? 'MongoDB has no schema model to list — every collection is exported.'
+                    : 'All tables unless you pick a subset.'
+                }
+              >
+                {/* The picker reads the canonical SchemaModel, which getSchema
+                    refuses to build for a document engine — so offering the
+                    button on Mongo only ever produces a red error box. */}
+                <Button size="sm" disabled={documentEngine} onClick={() => setChooseTables((v) => !v)}>
                   {chooseTables ? 'Hide table list' : `Choose tables${pickedTables.length ? ` (${pickedTables.length})` : ''}`}
                 </Button>
               </Field>
@@ -481,7 +531,10 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
           <Field label="NULL literal" hint="Empty = the format's own null.">
             <Input className="mono" value={nullLiteral} onChange={(e) => setNullLiteral(e.target.value)} placeholder="" />
           </Field>
-          <Field label="Delimiter" hint={delimited ? undefined : 'CSV only.'}>
+          <Field
+            label="Delimiter"
+            hint={!delimited ? 'CSV only.' : delimiter === '' ? `Empty — using ${format === 'tsv' ? 'tab' : 'comma'}.` : undefined}
+          >
             <Input
               className="mono"
               value={delimiter}
@@ -521,9 +574,17 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
 
         {advanced && (
           <div className="flex flex-col gap-3 border border-[var(--border)] bg-[var(--bg-subtle)] p-2">
+            {!toFile && (
+              <p className="border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-[11px] leading-snug text-[var(--fg-muted)]">
+                These apply to a <strong>file on the server</strong> only. A browser download always streams through the
+                built-in engine, so switch the destination to use <code className="mono">mysqldump</code>/
+                <code className="mono">pg_dump</code> or a remote-side dump.
+              </p>
+            )}
             <div className="flex flex-col gap-1">
               <Checkbox
                 checked={useNativeTool}
+                disabled={!toFile}
                 onChange={(e) => setUseNativeTool(e.target.checked)}
                 label="Use the bundled native tool (mysqldump / pg_dump / mongodump)"
               />
@@ -545,7 +606,7 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
             <div className="flex flex-col gap-1">
               <Checkbox
                 checked={remoteSide}
-                disabled={!viaSsh}
+                disabled={!viaSsh || !toFile}
                 onChange={(e) => setRemoteSide(e.target.checked)}
                 label="Run the dump on the remote host and stream compressed bytes back"
               />
@@ -664,6 +725,12 @@ function suggestFilename(source: ExportRequest['source'], format: ExportFormat, 
   return `${safe}-${stamp}.${ext}${gzip ? '.gz' : ''}`;
 }
 
+/**
+ * Everything the server would reject, caught here instead — because the
+ * download destination is a form POST into a hidden frame, so a 400 surfaces as
+ * a toast well after the dialog has closed and claimed success. Each of these
+ * mirrors a specific server-side refusal (api/export/build.ts, transfer/export).
+ */
 function validate(state: {
   connectionId: string | null;
   scope: ScopeKind;
@@ -672,6 +739,9 @@ function validate(state: {
   database: string;
   toFile: boolean;
   path: string;
+  format: ExportFormat;
+  documentEngine: boolean;
+  schemaName: string;
 }): string[] {
   const out: string[] = [];
   if (!state.connectionId) out.push('Pick a connection first.');
@@ -679,5 +749,14 @@ function validate(state: {
   if (state.scope === 'table' && state.tableName.trim() === '') out.push('Name the table to export.');
   if (state.scope === 'database' && state.database.trim() === '') out.push('Name the database to export.');
   if (state.toFile && state.path.trim() === '') out.push('Choose a destination file.');
+  // build.ts refuses a Mongo collection with no database to look it up in.
+  if (state.documentEngine && state.scope === 'table' && state.schemaName.trim() === '') {
+    out.push('Name the MongoDB database the collection lives in.');
+  }
+  // runExport refuses this: concatenated JSON arrays are not a JSON document,
+  // and neither route ever uses a directory destination.
+  if (state.format === 'json' && (state.scope === 'database' || state.scope === 'server')) {
+    out.push('A JSON export covers one table or query at a time — use NDJSON for a whole database.');
+  }
   return out;
 }

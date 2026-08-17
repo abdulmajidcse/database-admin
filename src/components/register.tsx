@@ -17,6 +17,7 @@ import { registerTabView, registerWorkspaceSlot, type SlotProps } from './shell/
 import { SchemaTree } from './tree/schema-tree';
 import { ResultTabs } from './editor/result-tabs';
 import { JobsSlot } from './transfer/jobs-drawer';
+import { TransferSlot } from './transfer/transfer-host';
 import { SqlWorkspace } from './editor/sql-editor';
 import { TableTab } from './table-tab';
 import { RedisWorkspace } from './redis/redis-workspace';
@@ -32,6 +33,9 @@ function ObjectTreeSlot({ connectionId }: SlotProps) {
 registerWorkspaceSlot('object-tree', ObjectTreeSlot);
 registerWorkspaceSlot('results', ResultTabs);
 registerWorkspaceSlot('jobs', JobsSlot);
+// The import/export wizards: one instance, mounted for the whole session so the
+// tree, the grid, the editor and the palette can all reach them (§7.1).
+registerWorkspaceSlot('overlays', TransferSlot);
 
 registerTabView('sql', SqlWorkspace);
 registerTabView('table', TableTab);

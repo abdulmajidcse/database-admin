@@ -13,8 +13,10 @@
  *    whole script on one pinned session (§6 "Sessions vs pools").
  *  - **The prod treatment is structural.** A production connection paints the
  *    toolbar red and every write goes through a typed confirmation (§9).
- *  - **Export streams.** It is a browser-owned form POST, never a fetch that
- *    buffers a gigabyte in a tab (§7.4).
+ *  - **Export belongs to the shared wizard.** This contributes the statement
+ *    behind the current result and hands off to the one dialog the shell mounts
+ *    (components/transfer/transfer-host.tsx), so the same Export button reaches
+ *    every §7.1 scope rather than only the result set.
  */
 
 import * as React from 'react';
@@ -24,7 +26,6 @@ import {
   Ban,
   ChevronsRight,
   Download,
-  FileCode2,
   Gauge,
   History as HistoryIcon,
   Lock,
@@ -33,19 +34,16 @@ import {
   Wand2,
 } from 'lucide-react';
 
-import { api, downloadExport } from '@/lib/api-client';
-import type { ExportFormat, ExportRequest, SchemaResponse, TreeResponse } from '@/lib/api-types';
+import { api } from '@/lib/api-client';
+import type { SchemaResponse, TreeResponse } from '@/lib/api-types';
 import type { ConnectionConfig } from '@/lib/connection';
 import { workspaceModeFor } from '@/lib/connection';
 import type { ExplainNode, ExplainPlan } from '@/lib/results';
 import {
   Badge,
   Button,
-  Checkbox,
   Dialog,
   ErrorBox,
-  Field,
-  Input,
   Select,
   Separator,
   Spinner,
@@ -60,6 +58,7 @@ import {
   type WorkspaceTab,
 } from '@/state/workspace-store';
 import { useConnections } from '@/components/shell/connection-sidebar';
+import { openExportDialog } from '@/components/transfer/transfer-host';
 import type { EditorHandle } from './sql-editor';
 import { HistoryDialog } from './history-panel';
 import { SavedQueriesDialog } from './saved-queries';
@@ -94,7 +93,6 @@ export function EditorToolbar(props: EditorToolbarProps) {
   const setActiveConnection = useWorkspaceStore((s) => s.setActiveConnection);
 
   const [explain, setExplain] = React.useState<{ open: boolean; analyze: boolean }>({ open: false, analyze: false });
-  const [exportOpen, setExportOpen] = React.useState(false);
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [savedOpen, setSavedOpen] = React.useState(false);
   const mod = useModifierLabel();
@@ -124,18 +122,6 @@ export function EditorToolbar(props: EditorToolbarProps) {
   const databases = (tree.data?.nodes ?? []).filter((n) => n.kind === 'database').map((n) => n.label);
   const namespaces = (schema.data?.model.namespaces ?? []).map((n) => n.name);
 
-  // The palette fires these at whichever pane owns them; the dialogs live here.
-  React.useEffect(
-    () =>
-      onWorkspaceCommand((command) => {
-        if (useWorkspaceStore.getState().activeTabId !== tab.id) return;
-        if (command === 'explain') setExplain({ open: true, analyze: false });
-        else if (command === 'export') setExportOpen(true);
-        else if (command === 'save') setSavedOpen(true);
-      }),
-    [tab.id],
-  );
-
   /** What Run/Explain/Export act on: the selection, else the statement under the caret. */
   const currentStatement = React.useCallback((): string => {
     const handle = editor.current;
@@ -151,6 +137,36 @@ export function EditorToolbar(props: EditorToolbarProps) {
     if (active && !active.error) return active.statement;
     return currentStatement();
   }, [currentStatement, runner.activeResult, runner.results]);
+
+  /**
+   * The editor's contribution to the export wizard is one thing: the statement
+   * behind whatever the user is looking at. Everything else — scopes, formats,
+   * destinations, native dumps — belongs to the shared dialog (§7.1), which is
+   * why this hands over a statement instead of rendering its own.
+   */
+  const openExport = React.useCallback((): void => {
+    const statement = exportStatement();
+    openExportDialog({
+      connectionId: tab.connectionId,
+      sql: statement,
+      source: statement.trim() === '' ? undefined : { kind: 'query', sql: statement },
+    });
+  }, [exportStatement, tab.connectionId]);
+
+  // The palette fires these at whichever pane owns them; the dialogs live here.
+  // 'export' is the exception: the wizard is mounted once by the shell, and this
+  // tab only contributes the statement behind the current result. The palette
+  // opens it directly when no SQL tab is active, so this never double-opens.
+  React.useEffect(
+    () =>
+      onWorkspaceCommand((command) => {
+        if (useWorkspaceStore.getState().activeTabId !== tab.id) return;
+        if (command === 'explain') setExplain({ open: true, analyze: false });
+        else if (command === 'export') openExport();
+        else if (command === 'save') setSavedOpen(true);
+      }),
+    [tab.id, openExport],
+  );
 
   return (
     <div className={cn('shrink-0', isProd && 'border-l-2 border-[var(--danger)]')}>
@@ -305,8 +321,8 @@ export function EditorToolbar(props: EditorToolbarProps) {
           variant="ghost"
           icon={<Download className="size-3" />}
           disabled={!tab.connectionId}
-          onClick={() => setExportOpen(true)}
-          title="Export this result set to a file"
+          onClick={openExport}
+          title="Export this result set, a table or the whole database"
         >
           Export
         </Button>
@@ -356,13 +372,6 @@ export function EditorToolbar(props: EditorToolbarProps) {
         onClose={() => setExplain((e) => ({ ...e, open: false }))}
         getStatement={currentStatement}
         runner={runner}
-      />
-
-      <ExportDialog
-        open={exportOpen}
-        onClose={() => setExportOpen(false)}
-        connectionId={tab.connectionId}
-        getStatement={exportStatement}
       />
 
       <HistoryDialog
@@ -502,115 +511,6 @@ function PlanNode({ node, depth }: { node: ExplainNode; depth: number }) {
         <PlanNode key={i} node={child} depth={depth + 1} />
       ))}
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Export (§7.4)
-// ---------------------------------------------------------------------------
-
-const EXPORT_FORMATS: ExportFormat[] = ['csv', 'tsv', 'json', 'ndjson', 'xlsx', 'markdown', 'html', 'sql'];
-
-function ExportDialog({
-  open,
-  onClose,
-  connectionId,
-  getStatement,
-}: {
-  open: boolean;
-  onClose: () => void;
-  connectionId: string | null;
-  /** Resolved when the dialog opens; see ExplainDialog. */
-  getStatement: () => string;
-}) {
-  const [format, setFormat] = React.useState<ExportFormat>('csv');
-  const [header, setHeader] = React.useState(true);
-  const [gzip, setGzip] = React.useState(false);
-  const [nullLiteral, setNullLiteral] = React.useState('');
-  const [delimiter, setDelimiter] = React.useState(',');
-
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const statement = React.useMemo(() => (open ? getStatement() : ''), [open]);
-  const textual = format === 'csv' || format === 'tsv';
-
-  function start(): void {
-    if (!connectionId) return;
-    if (statement.trim() === '') {
-      toast.error('There is no statement to export.');
-      return;
-    }
-    const request: ExportRequest = {
-      connectionId,
-      source: { kind: 'query', sql: statement },
-      format,
-      destination: { kind: 'download' },
-      options: {
-        compression: gzip ? 'gzip' : 'none',
-        structure: 'data-only',
-        binaryEncoding: 'base64',
-        nullLiteral,
-        delimiter: textual ? delimiter : undefined,
-        header,
-      },
-    };
-    // A form POST, not fetch(): the browser owns the transfer so a multi-GB
-    // export never has to exist in memory (§7.4).
-    downloadExport('/api/export/download', request);
-    onClose();
-  }
-
-  return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title="Export result"
-      width="sm"
-      footer={
-        <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" icon={<Download className="size-3.5" />} onClick={start} disabled={!connectionId}>
-            Download
-          </Button>
-        </>
-      }
-    >
-      <div className="flex flex-col gap-3">
-        <Field label="Format">
-          <Select value={format} onChange={(e) => setFormat(e.target.value as ExportFormat)}>
-            {EXPORT_FORMATS.map((f) => (
-              <option key={f} value={f}>
-                {f.toUpperCase()}
-              </option>
-            ))}
-          </Select>
-        </Field>
-        {textual && (
-          <>
-            <Field label="Delimiter">
-              <Select value={delimiter} onChange={(e) => setDelimiter(e.target.value)}>
-                <option value=",">comma</option>
-                <option value=";">semicolon</option>
-                <option value={'\t'}>tab</option>
-                <option value="|">pipe</option>
-              </Select>
-            </Field>
-            <Checkbox label="Write a header row" checked={header} onChange={(e) => setHeader(e.target.checked)} />
-          </>
-        )}
-        <Field label="NULL is written as" hint="Empty means an empty field.">
-          <Input value={nullLiteral} onChange={(e) => setNullLiteral(e.target.value)} />
-        </Field>
-        <Checkbox label="Compress with gzip" checked={gzip} onChange={(e) => setGzip(e.target.checked)} />
-        <div className="rounded border border-[var(--border)] bg-[var(--bg-subtle)] p-2">
-          <p className="mb-1 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--fg-subtle)]">
-            <FileCode2 className="size-3" /> statement
-          </p>
-          <pre className="mono max-h-24 overflow-auto whitespace-pre-wrap break-words text-[var(--fg-muted)]">
-            {statement || '—'}
-          </pre>
-        </div>
-      </div>
-    </Dialog>
   );
 }
 

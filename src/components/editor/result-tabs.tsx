@@ -14,11 +14,12 @@
  */
 
 import * as React from 'react';
-import { AlertTriangle, ArrowRightToLine, CheckCircle2, Table2 } from 'lucide-react';
+import { AlertTriangle, ArrowRightToLine, CheckCircle2, Download, Table2 } from 'lucide-react';
 
 import type { StatementResult } from '@/lib/results';
 import { Badge, Button, EmptyState, ErrorBox, Spinner, Tabs } from '@/components/ui/primitives';
 import { DataGrid } from '@/components/grid/data-grid';
+import { openExportDialog } from '@/components/transfer/transfer-host';
 import {
   formatDuration,
   revealOffset,
@@ -30,11 +31,18 @@ import {
 import type { WorkspaceTab } from '@/state/workspace-store';
 
 export interface ResultTabsProps {
+  /**
+   * The shell's active connection, from the slot contract — deliberately NOT
+   * used here. Results belong to the tab that ran them, and the sidebar's
+   * selection moves independently of the active tab, so everything below reads
+   * `tab.connectionId` instead. Using this one would page, edit and export
+   * against whichever connection happens to be highlighted.
+   */
   connectionId: string | null;
   tab: WorkspaceTab | null;
 }
 
-export function ResultTabs({ connectionId, tab }: ResultTabsProps) {
+export function ResultTabs({ tab }: ResultTabsProps) {
   const state = useRunnerState(tab?.id ?? null);
 
   if (!tab || tab.kind !== 'sql') {
@@ -92,7 +100,15 @@ export function ResultTabs({ connectionId, tab }: ResultTabsProps) {
         right={<RunSummary state={state} />}
       />
       <div className="min-h-0 flex-1">
-        <ResultBody tabId={tab.id} connectionId={connectionId} state={state} index={active} />
+        {/*
+          The connection that PRODUCED these rows, not the sidebar's current
+          selection. The two diverge freely — `setActiveTab` never syncs
+          `activeConnectionId`, and clicking any connection row changes only the
+          latter — so a tab bound to prod keeps showing prod's rows while the
+          sidebar sits on staging. Paging, editing and now exporting all follow
+          this prop, and every one of them is silent about which server it hit.
+        */}
+        <ResultBody tabId={tab.id} connectionId={tab.connectionId} state={state} index={active} />
       </div>
     </div>
   );
@@ -219,7 +235,29 @@ function ResultBody({
           it. It only needs the ResultSet and the connection it came from.
         */}
         {connectionId ? (
-          <DataGrid connectionId={connectionId} result={set} />
+          <DataGrid
+            connectionId={connectionId}
+            result={set}
+            toolbarExtra={
+              <Button
+                size="xs"
+                variant="ghost"
+                icon={<Download className="size-3.5" />}
+                disabled={set.statement.trim() === ''}
+                onClick={() =>
+                  openExportDialog({
+                    connectionId,
+                    sql: set.statement,
+                    // The statement, not the fetched page: an export re-runs it
+                    // and streams every row by cursor, so what you get is the
+                    // whole result rather than the 500 rows on screen (§7.4).
+                    source: { kind: 'query', sql: set.statement },
+                  })
+                }
+                title="Export every row this statement returns"
+              />
+            }
+          />
         ) : (
           <EmptyState title="No connection" description="This result came from a connection that is no longer open." />
         )}

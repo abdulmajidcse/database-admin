@@ -49,7 +49,13 @@ export interface SlotProps {
   tab: WorkspaceTab | null;
 }
 
-export type SlotName = 'object-tree' | 'results' | 'jobs' | 'sidebar-extra';
+/**
+ * `overlays` is rendered unconditionally, outside every panel and tab — the home
+ * for feature dialogs that any surface can open (the transfer wizards). A tab
+ * view cannot host those: the shell mounts only the active tab, so an export
+ * started from the command palette with no SQL tab open would go nowhere.
+ */
+export type SlotName = 'object-tree' | 'results' | 'jobs' | 'sidebar-extra' | 'overlays';
 
 const tabViews = new Map<TabKind, React.ComponentType<TabViewProps>>();
 const slots = new Map<SlotName, React.ComponentType<SlotProps>>();
@@ -161,6 +167,7 @@ export function Workspace() {
   const Results = slots.get('results');
   const JobsSlot = slots.get('jobs');
   const SidebarExtra = slots.get('sidebar-extra');
+  const Overlays = slots.get('overlays');
   const bottomTab = Results ? layout.bottomTab : 'jobs';
 
   return (
@@ -285,6 +292,7 @@ export function Workspace() {
 
       <StatusBar />
       <CommandPalette />
+      {Overlays && <Overlays connectionId={activeConnectionId} tab={activeTab} />}
     </div>
   );
 }

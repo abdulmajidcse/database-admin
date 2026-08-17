@@ -64,14 +64,78 @@ export const api = {
   del: <T>(path: string, body?: unknown, signal?: AbortSignal) => request<T>('DELETE', path, body, signal),
 };
 
+/** Hidden frames from earlier downloads, pruned lazily rather than on a timer. */
+const downloadFrames: { frame: HTMLIFrameElement; at: number }[] = [];
+const FRAME_TTL_MS = 30 * 60 * 1000;
+
 /**
  * Streaming download: exports must never be buffered in the browser either
- * (§7.4). Uses a hidden form-less navigation so the browser owns the transfer.
+ * (§7.4). A form POST rather than fetch() so the browser owns the transfer.
+ *
+ * The POST **must** target a hidden iframe. A top-level form POST only stays
+ * out of the viewport while the response carries `Content-Disposition:
+ * attachment`; the moment the server answers with a JSON error instead — an
+ * unqualified Mongo collection, a JSON export of a whole database, an expired
+ * session — the browser replaces the app with that JSON, taking every open tab
+ * and unsaved editor buffer with it. Targeting a frame keeps a rejection inside
+ * the frame, where `onError` can read it and turn it back into a toast.
  */
-export function downloadExport(path: string, body: unknown): void {
+export function downloadExport(
+  path: string,
+  body: unknown,
+  onError?: (message: string, hint?: string) => void,
+): void {
+  // A successful download never fires `load`, so its frame is retired here on a
+  // later call instead — long after the browser has committed to the transfer.
+  const now = Date.now();
+  for (let i = downloadFrames.length - 1; i >= 0; i--) {
+    if (now - downloadFrames[i].at > FRAME_TTL_MS) {
+      downloadFrames[i].frame.remove();
+      downloadFrames.splice(i, 1);
+    }
+  }
+
+  const name = `dbadmin-download-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const frame = document.createElement('iframe');
+  frame.name = name;
+  frame.setAttribute('aria-hidden', 'true');
+  frame.style.display = 'none';
+  document.body.appendChild(frame);
+  downloadFrames.push({ frame, at: now });
+
+  let settled = false;
+  frame.addEventListener('load', () => {
+    // Reaching here means the server rendered a document rather than streaming
+    // an attachment — i.e. it refused. Same-origin, so the body is readable.
+    if (settled) return;
+    settled = true;
+    let text = '';
+    try {
+      text = frame.contentDocument?.body?.textContent?.trim() ?? '';
+    } catch {
+      text = '';
+    }
+    if (text !== '') {
+      let message = text.slice(0, 400);
+      let hint: string | undefined;
+      try {
+        const parsed = JSON.parse(text) as { error?: unknown; hint?: unknown };
+        if (typeof parsed.error === 'string') message = parsed.error;
+        if (typeof parsed.hint === 'string') hint = parsed.hint;
+      } catch {
+        // Not JSON — show whatever it said rather than swallowing it.
+      }
+      onError?.(message, hint);
+    }
+    const i = downloadFrames.findIndex((f) => f.frame === frame);
+    if (i >= 0) downloadFrames.splice(i, 1);
+    frame.remove();
+  });
+
   const form = document.createElement('form');
   form.method = 'POST';
   form.action = path;
+  form.target = name;
   form.style.display = 'none';
   const payload = document.createElement('input');
   payload.name = 'payload';

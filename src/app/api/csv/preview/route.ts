@@ -67,6 +67,15 @@ function dialectOverrides(body: Record<string, unknown>): Partial<CsvDialect> {
   }
   const hasHeader = optionalBoolean(d, 'hasHeader');
   if (hasHeader !== undefined) overrides.hasHeader = hasHeader;
+  // These two ride along on the import itself, and `previewCsvFile` infers each
+  // column's type under them — so leaving them out here would type the preview
+  // by different rules than the load. A file writing NULLs as `NA` reads as text
+  // without the literal and as an integer with it, and the mapping is seeded
+  // from whichever answer the preview gave.
+  const nullLiteral = optionalString(d, 'nullLiteral');
+  if (nullLiteral !== undefined) overrides.nullLiteral = nullLiteral;
+  const trim = optionalBoolean(d, 'trim');
+  if (trim !== undefined) overrides.trim = trim;
   return overrides;
 }
 

@@ -296,9 +296,40 @@ async function runRowImport(
   // Verify before anything else touches the server: a typo in the mapping is
   // the most common failure and it should cost milliseconds, not a rollback.
   ctx.progress({ phase: 'validating' });
-  await verifyTarget(target, { schema, table, columns });
 
-  const keyColumns = params.keyColumns ?? (await primaryKeyOf(target, schema, table));
+  // §7.1: the target may not exist yet. A dry run must still write nothing, so
+  // it prints the DDL instead of running it — which is more useful anyway, since
+  // the types come from a sniffed sample and this is the moment to disagree.
+  const createSql = params.target.createTable
+    ? createTableSql(target.engine, { schema, table }, active)
+    : null;
+  if (createSql && !options.dryRun) {
+    await execDdl(target, createSql);
+    ctx.log(`Ensured the target table exists:\n${createSql}`);
+  } else if (createSql) {
+    ctx.log(`Dry run: the target table would be created first —\n${createSql}`);
+  }
+
+  let targetMissing = false;
+  try {
+    await verifyTarget(target, { schema, table, columns });
+  } catch (err) {
+    // Only a dry run against a table that is yet to be created may skip this,
+    // and only when the engine actually said "no such table". Every other
+    // failure — a mistyped target column, a denied SELECT — is exactly what this
+    // check exists to catch cheaply, and swallowing it would report a clean dry
+    // run for an import that cannot succeed.
+    if (!createSql || !options.dryRun || !isMissingTableError(err)) throw err;
+    targetMissing = true;
+    warnings.push(`${qualified} does not exist yet, so the column checks were skipped.`);
+    ctx.log(`Dry run: ${qualified} does not exist yet, so the column checks were skipped.`);
+  }
+
+  // A table that does not exist has no primary key to read, and Postgres'
+  // `$1::regclass` cast *errors* on a missing relation rather than answering
+  // NULL — so this has to be skipped, not merely tolerated.
+  const keyColumns =
+    params.keyColumns ?? (targetMissing ? [] : await primaryKeyOf(target, schema, table));
   const loadTable: LoadTable = { schema, table, columns, keyColumns, binaryColumns };
 
   const prep = await prepareSession(target, loadTable, options, ctx, warnings);
@@ -1249,6 +1280,124 @@ async function verifyTarget(target: Target, table: LoadTable): Promise<void> {
     }
     case 'mongodb':
       // A collection is created on first write; there is nothing to verify.
+      return;
+  }
+}
+
+/**
+ * "The relation does not exist", per engine — the only `verifyTarget` failure a
+ * dry run with "create the table" ticked is allowed to walk past. Everything
+ * else (a bad column, a denied SELECT) must still fail the run.
+ */
+function isMissingTableError(err: unknown): boolean {
+  if (err === null || typeof err !== 'object') return false;
+  const e = err as { code?: unknown; errno?: unknown; message?: unknown };
+  // 42P01 = Postgres undefined_table; 1146 / ER_NO_SUCH_TABLE = MySQL.
+  if (e.code === '42P01' || e.code === 'ER_NO_SUCH_TABLE' || e.errno === 1146) return true;
+  // better-sqlite3 has no stable code for this one.
+  return typeof e.message === 'string' && /no such table/i.test(e.message);
+}
+
+// ---------------------------------------------------------------------------
+// Creating the target (§7.1 "CSV / JSON / NDJSON → existing **or new** table")
+// ---------------------------------------------------------------------------
+
+/**
+ * The wizard's target types (components/transfer/csv-mapping.ts `TARGET_TYPES`)
+ * rendered per engine. The mapping screen has already decided every column's
+ * type from the sniffed sample, so the DDL is that decision plus a name.
+ *
+ * `text` is the fallback for anything unrecognised, which is the same direction
+ * `coerceValue` errs in — a landing table that holds the value is recoverable,
+ * one that rejects it is not.
+ */
+const CREATE_COLUMN_TYPES: Record<'postgres' | 'mysql' | 'sqlite', Record<string, string>> = {
+  postgres: {
+    text: 'text',
+    integer: 'integer',
+    bigint: 'bigint',
+    decimal: 'numeric',
+    float: 'double precision',
+    boolean: 'boolean',
+    date: 'date',
+    time: 'time',
+    timestamp: 'timestamptz',
+    json: 'jsonb',
+    uuid: 'uuid',
+    binary: 'bytea',
+  },
+  mysql: {
+    text: 'TEXT',
+    integer: 'INT',
+    bigint: 'BIGINT',
+    decimal: 'DECIMAL(38,10)',
+    float: 'DOUBLE',
+    boolean: 'TINYINT(1)',
+    date: 'DATE',
+    time: 'TIME',
+    timestamp: 'DATETIME',
+    json: 'JSON',
+    uuid: 'CHAR(36)',
+    binary: 'LONGBLOB',
+  },
+  // Affinity, not a type: SQLite stores what it is given (PLAN §6 "dynamic
+  // typing"), so these only steer the affinity rules.
+  sqlite: {
+    text: 'TEXT',
+    integer: 'INTEGER',
+    bigint: 'INTEGER',
+    decimal: 'NUMERIC',
+    float: 'REAL',
+    boolean: 'INTEGER',
+    date: 'TEXT',
+    time: 'TEXT',
+    timestamp: 'TEXT',
+    json: 'TEXT',
+    uuid: 'TEXT',
+    binary: 'BLOB',
+  },
+};
+
+/**
+ * `CREATE TABLE IF NOT EXISTS` for the mapped columns, or null when the engine
+ * has no such thing (Mongo creates a collection on first write).
+ *
+ * Deliberately minimal: every column is nullable and there is no key or index.
+ * A load target is a landing table, and §7.5 is explicit that indexes and
+ * constraints belong *after* the data — building them first is both slower and
+ * a way to fail half way through on a row order you did not choose.
+ */
+function createTableSql(
+  engine: EngineKind,
+  at: { schema?: string; table: string },
+  mapping: ColumnMapping[],
+): string | null {
+  if (engine === 'mongodb' || engine === 'redis') return null;
+  const dialect = engine === 'sqlite' ? 'sqlite' : engine === 'postgres' ? 'postgres' : 'mysql';
+  const types = CREATE_COLUMN_TYPES[dialect];
+  // SQLite has no schema-qualified CREATE beyond an ATTACHed alias, and the
+  // quoting module already drops the namespace for it.
+  const qualified = quoteQualified([engine === 'sqlite' ? undefined : at.schema, at.table], engine);
+  const columns = mapping.map((m) => {
+    const name = quoteIdent(m.targetColumn as string, engine);
+    return `  ${name} ${types[m.targetType ?? 'text'] ?? types.text}`;
+  });
+  return `CREATE TABLE IF NOT EXISTS ${qualified} (\n${columns.join(',\n')}\n)`;
+}
+
+async function execDdl(target: Target, sql: string): Promise<void> {
+  switch (target.handle.engine) {
+    case 'postgres':
+      await target.handle.client.query(sql);
+      return;
+    case 'mysql':
+    case 'mariadb':
+      await target.handle.conn.query(sql);
+      return;
+    case 'sqlite':
+      target.handle.db.exec(sql);
+      return;
+    case 'mongodb':
       return;
   }
 }
