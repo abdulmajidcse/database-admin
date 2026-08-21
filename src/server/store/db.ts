@@ -355,6 +355,36 @@ export const historyRepo = {
   },
 };
 
+/**
+ * Live templates (docs/roadmap.md M10). Owner-scoped like everything else here:
+ * a snippet is a private convenience, not shared state.
+ */
+export const snippetsRepo = {
+  list() {
+    return getDb()
+      .prepare('SELECT * FROM snippets WHERE owner_id = ? ORDER BY prefix')
+      .all(requireUserId()) as Record<string, unknown>[];
+  },
+  upsert(s: { id?: string; prefix: string; label?: string; body: string; engines?: string[] }) {
+    const now = Date.now();
+    const id = s.id ?? randomUUID();
+    getDb()
+      .prepare(
+        `INSERT INTO snippets (id, owner_id, prefix, label, body, engines, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           prefix = excluded.prefix, label = excluded.label, body = excluded.body,
+           engines = excluded.engines, updated_at = excluded.updated_at
+         WHERE snippets.owner_id = excluded.owner_id`,
+      )
+      .run(id, requireUserId(), s.prefix, s.label ?? '', s.body, (s.engines ?? []).join(','), now, now);
+    return id;
+  },
+  remove(id: string) {
+    getDb().prepare('DELETE FROM snippets WHERE id = ? AND owner_id = ?').run(id, requireUserId());
+  },
+};
+
 export const savedQueriesRepo = {
   list() {
     return getDb()

@@ -57,6 +57,23 @@ CREATE TABLE IF NOT EXISTS saved_queries (
 );
 CREATE INDEX IF NOT EXISTS idx_saved_folder ON saved_queries(folder, name);
 
+-- Live templates for the SQL editor (docs/roadmap.md M10). `prefix` is what the
+-- user types to summon one, so it is unique per owner rather than globally:
+-- two accounts may each define their own `sel`.
+CREATE TABLE IF NOT EXISTS snippets (
+  id          TEXT PRIMARY KEY,
+  owner_id    TEXT,
+  prefix      TEXT NOT NULL,
+  label       TEXT NOT NULL DEFAULT '',
+  body        TEXT NOT NULL,
+  -- Empty means every engine; otherwise a comma-separated EngineKind list, so
+  -- a Postgres-only snippet does not surface while editing MySQL.
+  engines     TEXT NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_snippets_prefix ON snippets(owner_id, prefix);
+
 CREATE TABLE IF NOT EXISTS schema_cache (
   connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
   scope         TEXT NOT NULL,

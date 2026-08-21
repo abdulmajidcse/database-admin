@@ -55,7 +55,7 @@ import {
 } from '@/hooks/use-query-runner';
 import { statementAtOffset, type SqlDialect } from '@/server/db/sql/lexer';
 import { FormatRefusedError, formatSql } from '@/server/db/sql/format';
-import { lexerDialect, sqlLanguageExtension } from './completion';
+import { lexerDialect, sqlLanguageExtension, type EditorSnippet } from './completion';
 import { EditorToolbar } from './editor-toolbar';
 import { ParamsBar } from './params-bar';
 import { ResultTabs } from './result-tabs';
@@ -175,6 +175,8 @@ export interface SqlEditorProps {
   model: SchemaModel | null;
   defaultSchema?: string;
   readOnly?: boolean;
+  /** User live templates (docs/roadmap.md M10). */
+  snippets?: EditorSnippet[];
   errorMarks: ErrorMark[];
   onRunStatement: () => void;
   onRunScript: () => void;
@@ -199,8 +201,9 @@ export const SqlEditor = React.forwardRef<EditorHandle, SqlEditorProps>(function
         engine: props.engine,
         model: props.model,
         defaultSchema: props.defaultSchema,
+        snippets: props.snippets,
       }),
-    [props.engine, props.model, props.defaultSchema],
+    [props.engine, props.model, props.defaultSchema, props.snippets],
   );
 
   const doFormat = React.useCallback(() => {
@@ -408,6 +411,15 @@ export function SqlWorkspace({ tab }: TabViewProps) {
     (next: string) => useWorkspaceStore.getState().setTabState(tab.id, { sql: next }),
     [tab.id],
   );
+
+  // The user's live templates. Cached hard: they change when someone edits
+  // them, not while you type.
+  const snippetsQuery = useQuery<{ snippets: EditorSnippet[] }>({
+    queryKey: ['snippets'],
+    queryFn: () => api.get<{ snippets: EditorSnippet[] }>('/api/snippets'),
+    staleTime: 300_000,
+    retry: false,
+  });
 
   const schemaQuery = useQuery<SchemaResponse>({
     queryKey: ['schema', tab.connectionId],
@@ -654,6 +666,7 @@ export function SqlWorkspace({ tab }: TabViewProps) {
             engine={engine}
             model={schemaQuery.data?.model ?? null}
             defaultSchema={schema}
+            snippets={snippetsQuery.data?.snippets ?? []}
             errorMarks={errorMarks}
             onRunStatement={runStatement}
             onRunScript={runScript}

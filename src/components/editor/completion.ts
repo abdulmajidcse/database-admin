@@ -21,6 +21,7 @@
  */
 
 import type { Completion, CompletionContext, CompletionResult, CompletionSource } from '@codemirror/autocomplete';
+import { snippetCompletion } from '@codemirror/autocomplete';
 import {
   MariaSQL,
   MySQL,
@@ -349,6 +350,8 @@ export interface SqlLanguageOptions {
   /** Namespace whose tables complete unqualified — the editor's current schema. */
   defaultSchema?: string;
   upperCaseKeywords?: boolean;
+  /** User live templates (docs/roadmap.md M10). */
+  snippets?: EditorSnippet[];
 }
 
 /**
@@ -357,6 +360,48 @@ export interface SqlLanguageOptions {
  * from the new extensions and completion becomes accurate immediately (§6
  * "Schema cache freshness").
  */
+/**
+ * One user snippet, as the editor needs it (docs/roadmap.md M10).
+ * `body` is CodeMirror snippet syntax, so `${1:table}` becomes a tab stop.
+ */
+export interface EditorSnippet {
+  prefix: string;
+  label: string;
+  body: string;
+  engines: string[];
+}
+
+/**
+ * Snippets as a completion source. CodeMirror's own `snippetCompletion` handles
+ * the tab stops, so this only decides which snippets apply and how they rank.
+ *
+ * They are boosted above schema completions: you typed a prefix you invented,
+ * so you meant it, whereas a column that merely starts with the same letters is
+ * a coincidence.
+ */
+export function snippetCompletionSource(
+  getSnippets: () => EditorSnippet[],
+  getEngine: () => EngineKind | null,
+): CompletionSource {
+  return (context: CompletionContext): CompletionResult | null => {
+    const word = context.matchBefore(/\w+/);
+    if (!word || (word.from === word.to && !context.explicit)) return null;
+    const engine = getEngine();
+    const options = getSnippets()
+      .filter((s) => s.engines.length === 0 || (engine !== null && s.engines.includes(engine)))
+      .map((s) =>
+        snippetCompletion(s.body, {
+          label: s.prefix,
+          detail: s.label || 'snippet',
+          type: 'text',
+          boost: 50,
+        }),
+      );
+    if (options.length === 0) return null;
+    return { from: word.from, options, validFor: /^\w*$/ };
+  };
+}
+
 export function sqlLanguageExtension(options: SqlLanguageOptions): Extension {
   const dialect = codeMirrorDialect(options.engine);
   const namespace = options.model ? buildSqlNamespace(options.model) : undefined;
@@ -375,6 +420,12 @@ export function sqlLanguageExtension(options: SqlLanguageOptions): Extension {
     support,
     support.language.data.of({
       autocomplete: aliasCompletionSource({ getIndex: () => index, getDialect: () => lexer }),
+    }),
+    support.language.data.of({
+      autocomplete: snippetCompletionSource(
+        () => options.snippets ?? [],
+        () => options.engine,
+      ),
     }),
   ];
 }
