@@ -10,42 +10,64 @@ You need Docker and nothing else. Node is not required on your machine.
 ```bash
 git clone git@github.com:abdulmajidcse/database-admin.git
 cd database-admin
-docker compose -f compose.dev.yml --profile dbs up
+docker compose up --build
 ```
 
-That starts the app with HMR **and** all five database engines to develop against, on one
-network. Open <http://127.0.0.1:3456/> and create an account.
+That builds and runs the production image. Open <http://127.0.0.1:3456/> and create an account.
 
-If you would rather run it directly on your machine, see
-[Running without Docker](README.md#running-without-docker) in the README. You will need
-Node 22+, and the native dump tools stop working until you install them separately.
+To actually work on the code, run it on the host instead — Node 22+, and the native dump tools
+need installing separately (see [Running without Docker](README.md#running-without-docker)):
+
+```bash
+npm install
+npm run dev        # http://127.0.0.1:3456
+```
 
 ## The two compose files
 
-This trips people up, so it is worth stating plainly:
-
-| File | Service | Purpose |
+| File | Contains | Purpose |
 | --- | --- | --- |
-| `compose.yml` | `app` | Production image, `restart: unless-stopped`, no source mount |
-| `compose.dev.yml` | `devapp` | Bind-mounted source, HMR, plus the `dbs` engine profile |
+| `compose.yml` | `app` | The production image, `restart: unless-stopped` |
+| `compose.test.yml` | five engines, no app | Databases for `npm test`, up only while testing |
 
-**The service names must stay different.** Both files use the project name `database-admin`,
-so two services called `app` would resolve to the same container — and starting the engines
-from `compose.dev.yml` would then stop a running production app mid-request. If you find
-yourself "tidying" `devapp` back to `app`, don't.
+`compose.test.yml` deliberately has **no app service**, so it can never collide with
+`compose.yml`'s published port and you can run both at once. Same directory means the same
+compose project, which is what puts the engines on the network the app container reaches them by
+service name on.
 
-Both publish `127.0.0.1:3456`, so run one stack or the other. To run both, override the port:
+Take the engines down with `-v` when you are finished — they are test fixtures, not data you
+want surviving:
 
 ```bash
-DBADMIN_PORT=3457 docker compose -f compose.dev.yml up -d devapp
+docker compose -f compose.test.yml up -d
+docker compose -f compose.test.yml down -v
 ```
 
 ## Checks before you open a pull request
 
 ```bash
-docker compose -f compose.dev.yml exec devapp npm run typecheck
-docker compose -f compose.dev.yml exec devapp npm test
+npm run typecheck
+npm test
 ```
+
+### No Node on your machine?
+
+Run both checks in a throwaway container. This is the whole command — copy it as-is:
+
+```bash
+docker run --rm -v "$PWD":/app -w /app \
+  -v database-admin-check-modules:/app/node_modules \
+  node:22 sh -c "npm install && npm run typecheck && npm test"
+```
+
+The named volume is not optional. Your working copy's `node_modules` holds native modules built
+for your OS, and they will not run on Linux — the separate volume is what stops the container's
+copy and yours overwriting each other. Everything else is bind-mounted, so it checks the code you
+actually have.
+
+A green run ends with `216 passed`. The same command appears in the
+[README](README.md#running-the-checks-without-node), so quote whichever one your reviewer will
+have open.
 
 `npm test` is vitest. Today that means 216 unit tests over the SQL lexer, the changeset
 builder and the schema differ — they need no database and finish in well under a second.
@@ -57,14 +79,12 @@ SQL cannot be meaningfully unit tested — it has to execute against a real serv
 connector change is currently unverified by CI.
 
 If you pick this up: the helper reads `TEST_MYSQL_HOST`, `TEST_PG_PORT` and friends, defaulting
-to the ports `compose.dev.yml` publishes on `127.0.0.1`. Running inside the container instead,
-point them at the compose service names:
+to the ports `compose.test.yml` publishes on `127.0.0.1`, so `npm test` on the host needs no
+configuration at all:
 
 ```bash
-docker compose -f compose.dev.yml run --rm --no-deps \
-  -e TEST_PG_HOST=postgres -e TEST_PG_PORT=5432 \
-  -e TEST_MYSQL_HOST=mysql -e TEST_MYSQL_PORT=3306 \
-  devapp npm test
+docker compose -f compose.test.yml up -d
+npm test
 ```
 
 If you touch a connector, add a case that exercises it against the real engine.

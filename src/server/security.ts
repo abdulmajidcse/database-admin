@@ -44,10 +44,9 @@ export function isAllowedHost(hostHeader: string | undefined): boolean {
     host === '127.0.0.1' ||
     host === '::1' ||
     host === '0.0.0.0' ||
-    // Reaching the container by its service name on a compose network is legitimate.
-    // `app` is compose.yml's service, `devapp` is compose.dev.yml's.
+    // Reaching the container by its service name on a compose network is
+    // legitimate; `app` is compose.yml's service.
     host === 'app' ||
-    host === 'devapp' ||
     host === 'host.docker.internal'
   );
 }

@@ -422,11 +422,11 @@ Shipping **multiple Postgres client versions** is deliberate: §7.2 refuses to d
 
 ### 10.2 Compose
 
-`compose.yml` runs the app; `compose.dev.yml` bind-mounts source for `next dev` with HMR and adds a `dbs` profile that spins up all five engines to develop against — worth having, since none are installed on this machine.
+`compose.yml` runs the app; `compose.test.yml` holds the five engines and nothing else, brought up only while the tests need them — worth having, since none are installed on this machine. Development itself happens on the host (`npm run dev`), pinned to the same bundler the production build uses.
 
 ```
 docker compose up                    # app only
-docker compose --profile dbs up      # app + MySQL, MariaDB, Postgres, Redis, Mongo on one network
+docker compose -f compose.test.yml up -d   # MySQL, MariaDB, Postgres, Redis, Mongo on one network
 ```
 
 | Setting | Value | Why |
@@ -489,7 +489,7 @@ src/
 server.ts                 # http + next handler + ws upgrade
 Dockerfile                # multi-stage: deps → build → runtime w/ native CLI tools (§10.1)
 compose.yml               # app; 127.0.0.1 publish, named volume, mounts
-compose.dev.yml           # bind-mounted source + HMR, `dbs` profile with all five engines
+compose.test.yml          # the five engines, no app service — up only while testing
 .dockerignore             # must exclude node_modules — never ship a macOS-built native module
 ```
 
@@ -501,7 +501,7 @@ Each ships something usable. Sizes assume solo work.
 
 | # | Milestone | Deliverable | Done when |
 | --- | --- | --- | --- |
-| **M0** | Foundations + Docker + connectivity (~2w) | **Dockerfile + compose (app & dev, `dbs` profile) from commit one** — nothing is ever built on the host; scaffold, custom server, app-db store on a named volume, vault, connection CRUD UI over the `Address` × `Access` union, **`AccessResolver`** (direct, unix socket, SSH tunnel w/ agent + key + bastion chain, proxy process), `host.docker.internal` rewrite hint, TLS config, test-connection, auto-reconnect | `docker compose --profile dbs up` gives you five running engines; a mounted SQLite file, a compose-network Postgres, a Mac-host MySQL via `host.docker.internal`, and a remote one behind a bastion all show green — and survive the laptop sleeping |
+| **M0** | Foundations + Docker + connectivity (~2w) | **Dockerfile + compose (app, plus an engines-only test stack) from commit one** — nothing is ever built on the host; scaffold, custom server, app-db store on a named volume, vault, connection CRUD UI over the `Address` × `Access` union, **`AccessResolver`** (direct, unix socket, SSH tunnel w/ agent + key + bastion chain, proxy process), `host.docker.internal` rewrite hint, TLS config, test-connection, auto-reconnect | `docker compose -f compose.test.yml up -d` gives you five running engines; a mounted SQLite file, a compose-network Postgres, a Mac-host MySQL via `host.docker.internal`, and a remote one behind a bastion all show green — and survive the laptop sleeping |
 | **M1** | SQL core (~2.5w) | **SQLite connector first** (+ worker-thread pool), then MySQL + PG; ConnectionManager, introspection → canonical model, schema tree, data grid w/ paging + sort + filter | You can browse any table in any of the three engines and page through 1M rows smoothly |
 | **M2** | SQL editor (~2w) | CodeMirror, schema autocomplete, statement lexer, run / run-under-cursor / run-selection, multi result tabs, cancel, query history, **quick export of a result set to CSV/JSON** | You'd reach for this instead of `psql` for everyday queries |
 | **M3** | Editing & DDL (~2w) | Cell editing → changeset → diff preview → transactional apply, insert/delete rows, table/index/FK editors, DDL generation & export, SQLite 12-step `ALTER` rebuild | You can fix a bad row and create a table without writing SQL |
@@ -526,7 +526,7 @@ Ordering notes:
 - **Unit:** statement lexer (a nasty fixture corpus), changeset→SQL generator, canonical schema differ, quoting functions, CSV sniffer/writer edge cases.
 - **Remote-condition tests:** put **toxiproxy** (it has a testcontainers module) in front of a containerized engine and inject 200 ms latency, bandwidth caps, and mid-query connection drops. Assert that introspection stays within its round-trip budget, that reconnect works, and that a dropped link never loses editor state. This is the only way to catch remote-only bugs without waiting to hit them in production.
 - **Component:** grid virtualization + editing state, tree lazy loading.
-- **Manual smoke:** one checklist per engine per milestone, run against the `docker compose --profile dbs` stack.
+- **Manual smoke:** one checklist per engine per milestone, run against the `docker compose -f compose.test.yml` stack.
 
 Tests run on the host (or in CI) against the built image — **not inside the app container**, which would need the Docker socket mounted and is a privilege-escalation path (§10.4). Since there's no Node on this machine, the practical runner is a dedicated `test` compose service with the socket mounted deliberately, or GitHub Actions.
 

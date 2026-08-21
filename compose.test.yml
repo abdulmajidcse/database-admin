@@ -1,50 +1,25 @@
-# PLAN §10.2 — development. Bind-mounts source for HMR, and carries a `dbs`
-# profile with all five engines so there is something to develop against.
+# PLAN §13 — the engines the test suite runs against.
 #
-#   docker compose -f compose.dev.yml up                    # dev app only
-#   docker compose -f compose.dev.yml --profile dbs up      # dev app + every engine
+# Engines only: there is no app service here, so this file can never collide
+# with compose.yml's published port. Bring them up only while testing, and take
+# them down (with their volumes) afterwards:
 #
-# The service is `devapp`, not `app`, on purpose. Both files share the project
-# name `database-admin`, so a service called `app` here would resolve to the
-# same container as compose.yml's — and starting the engines would converge
-# that container, SIGTERM-ing a running production app. Different names make
-# each file's container a harmless orphan to the other. They still both
-# publish 3456, so run one stack or the other, not both.
+#   docker compose -f compose.test.yml up -d      # pull + start all five
+#   npm test                                      # from the host
+#   docker compose -f compose.test.yml down -v    # stop and discard the data
 #
-# node_modules stays in a named volume so the Linux-built native modules are
-# never shadowed by a macOS-built host directory.
+# The published ports are the ones tests/helpers/engines.ts already defaults to,
+# so `npm test` needs no configuration. They are deliberately non-standard
+# (13306 rather than 3306) to avoid colliding with an engine you run for
+# something else — this machine already has Postgres on 5432 and Redis on 6379.
+#
+# Same directory, so the compose project name is `database-admin` — the same one
+# compose.yml uses. That is what puts these engines on the `database-admin_dbadmin`
+# network, where the app container and the Playwright e2e container reach them by
+# service name (§10.3: inside a container, `localhost` is that container).
 
 services:
-  devapp:
-    build:
-      context: .
-      target: deps
-    command: sh -c "npm install --no-audit --no-fund && npm run dev"
-    working_dir: /app
-    ports:
-      - "127.0.0.1:${DBADMIN_PORT:-3456}:${DBADMIN_PORT:-3456}"
-    environment:
-      NODE_ENV: development
-      PORT: ${DBADMIN_PORT:-3456}
-      DBADMIN_HOME: /data/app
-      DBADMIN_SQLITE_ROOT: /data/sqlite
-      DBADMIN_EXPORT_ROOT: /data/exports
-      SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
-      WATCHPACK_POLLING: "true"
-    volumes:
-      - .:/app
-      - dbadmin-node-modules:/app/node_modules
-      - dbadmin-next-cache:/app/.next
-      - dbadmin-dev-data:/data/app
-      - ./data/sqlite:/data/sqlite
-      - ./data/exports:/data/exports
-      - ${HOME}/.ssh:/home/node/.ssh:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks: [dbadmin]
-
   mysql:
-    profiles: [dbs]
     image: mysql:8.4
     environment:
       MYSQL_ROOT_PASSWORD: dbadmin
@@ -63,7 +38,6 @@ services:
     networks: [dbadmin]
 
   mariadb:
-    profiles: [dbs]
     image: mariadb:11.4
     environment:
       MARIADB_ROOT_PASSWORD: dbadmin
@@ -80,7 +54,6 @@ services:
     networks: [dbadmin]
 
   postgres:
-    profiles: [dbs]
     image: postgres:17
     environment:
       POSTGRES_PASSWORD: dbadmin
@@ -97,7 +70,6 @@ services:
     networks: [dbadmin]
 
   redis:
-    profiles: [dbs]
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports: ["127.0.0.1:16379:6379"]
@@ -110,7 +82,6 @@ services:
     networks: [dbadmin]
 
   mongo:
-    profiles: [dbs]
     image: mongo:7
     environment:
       MONGO_INITDB_ROOT_USERNAME: dbadmin
@@ -125,9 +96,6 @@ services:
     networks: [dbadmin]
 
 volumes:
-  dbadmin-node-modules:
-  dbadmin-next-cache:
-  dbadmin-dev-data:
   mysql-data:
   mariadb-data:
   postgres-data:

@@ -34,10 +34,6 @@ created them.
 You need Docker. You do **not** need Node installed — everything builds and runs inside the container.
 
 ```bash
-# App plus all five database engines to play with
-docker compose -f compose.dev.yml --profile dbs up
-
-# App only (production image)
 docker compose up --build
 ```
 
@@ -49,6 +45,38 @@ http://127.0.0.1:3456/
 
 Prefer to run it directly on your machine? See [Running without Docker](#running-without-docker) —
 it needs Node 22 and gives up the bundled dump tools, but local databases get simpler.
+
+### Every command, in one place
+
+Docker is the only requirement. Nothing below needs Node on your machine.
+
+| What you want | Command |
+| --- | --- |
+| Run the app | `docker compose up --build` |
+| Stop it | `docker compose down` |
+| Follow its logs | `docker compose logs -f app` |
+| Start the five test engines | `docker compose -f compose.test.yml up -d` |
+| Stop them and discard their data | `docker compose -f compose.test.yml down -v` |
+| Typecheck and test | see [without Node](#running-the-checks-without-node) below |
+| Rebuild after changing the source | `docker compose up -d --build app` |
+
+#### Running the checks without Node
+
+`npm run typecheck` and `npm test` assume Node 22 on your machine. Without it, run them in a
+throwaway container — this is the full command, copy it as-is:
+
+```bash
+docker run --rm -v "$PWD":/app -w /app \
+  -v database-admin-check-modules:/app/node_modules \
+  node:22 sh -c "npm install && npm run typecheck && npm test"
+```
+
+The named volume is not optional. Your working copy's `node_modules` holds macOS-built native
+modules that will not run on Linux, and the reverse is equally true — keeping the container's
+copy in its own volume is what stops the two overwriting each other. Everything else is
+bind-mounted, so the container tests the code you actually have.
+
+It ends with a vitest summary; `216 passed` is the current expected count.
 
 Sign in, or create an **account** from the link on the sign-in screen. Accounts exist only on this
 machine, in `accounts.json` under `DBADMIN_HOME` — nothing is registered anywhere.
@@ -99,7 +127,8 @@ Any website you visit can issue requests to this port. The session cookie is `Ht
 | Remote | the real hostname |
 
 The connection form detects `localhost`/`127.0.0.1` and offers a one-click fix, so you do not have to
-remember this. With `--profile dbs`, the bundled engines are reachable by service name:
+remember this. The `compose.test.yml` engines are reachable by service name from the app
+container, and on the ports below from your machine:
 
 | Engine | Host | Port | User / password |
 | --- | --- | --- | --- |
@@ -196,23 +225,34 @@ behind an explicit opt-in.
 
 ## Development
 
+Docker runs the production image. Develop on the host, where the edit-reload loop is direct:
+
 ```bash
-docker compose -f compose.dev.yml --profile dbs up   # HMR, source bind-mounted
-docker compose -f compose.dev.yml exec devapp npm run typecheck
-docker compose -f compose.dev.yml exec devapp npm test
+npm install
+npm run dev        # http://127.0.0.1:3456
+npm run typecheck
+npm test
 ```
 
-The dev service is `devapp`, while `compose.yml`'s is `app`. Both files share the project name
-`database-admin`, so identical service names would mean one shared container — and starting the
-engines from this file would kill a running production app. Point browser E2E at
-`APP_URL=http://devapp:3456` when driving this stack; the default targets `app`.
+Without Node on your machine, run them in a container instead —
+[Running the checks without Node](#running-the-checks-without-node) has the full command.
 
-`node_modules` lives in a named volume so Linux-built native modules are never shadowed by a
-host-built directory. Never copy `node_modules` from the host into the image.
+Dev is pinned to webpack — the same bundler `npm run build` uses. Next 16 defaults to Turbopack,
+which cannot statically resolve the SQLite worker entry and falls back to globbing the repo root,
+dragging `LICENSE` and `vitest.config.ts` into an API route until it 500s. One bundler across dev
+and production also means a dev-only bug cannot hide behind a bundler difference.
 
-Tests run against real engines via testcontainers — introspection SQL cannot be meaningfully unit
-tested. They run on the host or in CI, not inside the app container, which would need the Docker
-socket mounted.
+The engines the tests need come up separately, and only while you need them:
+
+```bash
+docker compose -f compose.test.yml up -d      # five engines, no app
+npm test
+docker compose -f compose.test.yml down -v    # stop and discard their data
+```
+
+Tests run against those real engines — introspection SQL cannot be meaningfully unit tested. They
+run on the host or in CI, never inside the app container, which would need the Docker socket
+mounted.
 
 ---
 
@@ -286,7 +326,7 @@ Running the app on the host does not mean running databases there. The simplest 
 host app plus containerised engines:
 
 ```bash
-docker compose -f compose.dev.yml --profile dbs up -d mysql mariadb postgres redis mongo
+docker compose -f compose.test.yml up -d
 ```
 
 They publish on `127.0.0.1` at the ports `tests/helpers/engines.ts` already defaults to, so
