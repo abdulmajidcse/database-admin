@@ -51,6 +51,10 @@ import type { ColumnMeta, ResultSet } from '../../lib/results';
 import { cellToText, type Cell, type Row } from '../../lib/wire';
 import { renderInsertRows, renderUpdateRow } from '../../server/db/sql/dml';
 import { useConnections } from '../shell/connection-sidebar';
+import { useSchema } from '../../hooks/use-schema';
+import { useWorkspaceStore } from '../../state/workspace-store';
+import { findTable } from '../../lib/schema-model';
+import { incomingFor, outgoingFor, type FkDestination } from './fk-navigation';
 import { Badge, Button, EmptyState, Separator, Spinner, Toolbar, cn } from '../ui/primitives';
 import { CellEditor, GridCell, alignsRight } from './cell';
 import { CellViewer } from './cell-viewer';
@@ -228,6 +232,9 @@ export function DataGrid({
   // guessing a quoting style.
   const connections = useConnections();
   const engine = connections.data?.connections.find((c) => c.id === connectionId)?.engine;
+  // Foreign keys come from the introspected model, which is cached — this adds
+  // no round trip to opening a grid.
+  const schema = useSchema(connectionId, { enabled: true });
 
   const [edit, dispatch] = useEditState();
   const [extraRows, setExtraRows] = React.useState<Row[]>([]);
@@ -242,6 +249,7 @@ export function DataGrid({
   const [editSeed, setEditSeed] = React.useState<string | null>(null);
   const [viewerAt, setViewerAt] = React.useState<Point | null>(null);
   const [copyMenuOpen, setCopyMenuOpen] = React.useState(false);
+  const [ctx, setCtx] = React.useState<{ x: number; y: number; point: Point } | null>(null);
   const [detailRow, setDetailRow] = React.useState<number | null>(null);
   const [changesetOpen, setChangesetOpen] = React.useState(false);
   const [widths, setWidths] = React.useState<Record<string, number>>(() => initialWidths(columns));
@@ -561,6 +569,47 @@ export function DataGrid({
     [sel, columns, order, valueAt, result.editTarget, engine],
   );
 
+  /**
+   * Where the right-clicked cell can take you (docs/roadmap.md M10). Both
+   * directions are computed from the cached model, so the menu knows before it
+   * opens whether there is anywhere to go.
+   */
+  const destinations = React.useMemo<{ out: FkDestination[]; in: FkDestination[] }>(() => {
+    const none = { out: [], in: [] };
+    const target = result.editTarget;
+    const model = schema.model;
+    if (!ctx || !target || !model) return none;
+    const table = findTable(model, target.schema, target.table);
+    if (!table) return none;
+    const names = columns.map((c) => c.name);
+    const rowCells = names.map((_n, i) => valueAt(ctx.point.r, i));
+    const column = columns[order[ctx.point.c]]?.name;
+    return {
+      out: column ? outgoingFor(table, column, rowCells, names) : [],
+      in: incomingFor(model, table, rowCells, names),
+    };
+  }, [ctx, result.editTarget, schema.model, columns, order, valueAt]);
+
+  const goTo = React.useCallback(
+    (dest: FkDestination) => {
+      setCtx(null);
+      useWorkspaceStore.getState().openTab({
+        kind: 'table',
+        title: dest.table,
+        connectionId,
+        state: {
+          schema: dest.schema,
+          table: dest.table,
+          // The filter layer parameterizes these; no value reaches SQL text.
+          filter: { filters: dest.filters, where: '' },
+          offset: 0,
+          sort: [],
+        },
+      });
+    },
+    [connectionId],
+  );
+
   /** Kept so the existing ⌘C / ⌘⇧C bindings read unchanged. */
   const copySelection = React.useCallback(
     (withHeader: boolean) => copyAs(withHeader ? 'tsv-header' : 'tsv'),
@@ -639,6 +688,16 @@ export function DataGrid({
       return;
     }
     select(hit.point, e.shiftKey);
+  };
+
+  const onGridContextMenu = (e: React.MouseEvent) => {
+    const hit = pointFromEvent(e);
+    if (!hit || hit.gutter) return;
+    e.preventDefault();
+    // Right-clicking moves the selection first, so the menu always describes
+    // the cell it is pointing at rather than a stale one.
+    select(hit.point, false);
+    setCtx({ x: e.clientX, y: e.clientY, point: hit.point });
   };
 
   const onGridDoubleClick = (e: React.MouseEvent) => {
@@ -959,6 +1018,7 @@ export function DataGrid({
         aria-colcount={order.length}
         onKeyDown={onKeyDown}
         onMouseDown={onGridMouseDown}
+        onContextMenu={onGridContextMenu}
         onDoubleClick={onGridDoubleClick}
         className="mono relative min-h-0 flex-1 overflow-auto outline-none"
       >
@@ -1144,6 +1204,70 @@ export function DataGrid({
         paging={paging}
         counts={counts}
       />
+
+      {ctx && (
+        <>
+          {/* A full-screen catcher, so any click or scroll dismisses the menu. */}
+          <div className="fixed inset-0 z-40" onMouseDown={() => setCtx(null)} onWheel={() => setCtx(null)} />
+          <div
+            className="fixed z-50 min-w-56 rounded border border-[var(--border)] bg-[var(--bg-raised)] py-1 shadow-lg"
+            style={{ left: ctx.x, top: ctx.y }}
+          >
+            <button
+              type="button"
+              className="block w-full px-3 py-1 text-left text-[11px] hover:bg-[var(--bg-hover)]"
+              onClick={() => {
+                setCtx(null);
+                setViewerAt(ctx.point);
+              }}
+            >
+              Expand cell
+            </button>
+
+            {destinations.out.length > 0 && (
+              <>
+                <div className="mt-1 border-t border-[var(--border)] px-3 pt-1 text-[10px] uppercase text-[var(--fg-subtle)]">
+                  Go to
+                </div>
+                {destinations.out.map((d, i) => (
+                  <button
+                    key={`out-${i}`}
+                    type="button"
+                    className="block w-full px-3 py-1 text-left text-[11px] hover:bg-[var(--bg-hover)]"
+                    onClick={() => goTo(d)}
+                  >
+                    {d.label}
+                  </button>
+                ))}
+              </>
+            )}
+
+            {destinations.in.length > 0 && (
+              <>
+                <div className="mt-1 border-t border-[var(--border)] px-3 pt-1 text-[10px] uppercase text-[var(--fg-subtle)]">
+                  Referenced by
+                </div>
+                {destinations.in.map((d, i) => (
+                  <button
+                    key={`in-${i}`}
+                    type="button"
+                    className="block w-full px-3 py-1 text-left text-[11px] hover:bg-[var(--bg-hover)]"
+                    onClick={() => goTo(d)}
+                  >
+                    {d.label}
+                  </button>
+                ))}
+              </>
+            )}
+
+            {destinations.out.length === 0 && destinations.in.length === 0 && (
+              <div className="px-3 py-1 text-[11px] text-[var(--fg-subtle)]">
+                No foreign keys touch this row
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {viewerAt && columns[order[viewerAt.c]] && (
         <CellViewer
