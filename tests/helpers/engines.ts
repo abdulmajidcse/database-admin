@@ -4,7 +4,7 @@
  * Introspection SQL cannot be meaningfully unit tested — it has to run against
  * a real server. Rather than docker-in-docker (§10.4 says the suite must not
  * run inside the app container), these tests target the engines already started
- * by `docker compose -f compose.dev.yml --profile dbs up`.
+ * by `docker compose -f compose.test.yml up -d`.
  *
  * Each engine is skipped, loudly, when it is not reachable — a silently skipped
  * test suite is worse than a failing one.
@@ -29,7 +29,7 @@ export interface EngineTarget {
 }
 
 /**
- * Defaults match compose.dev.yml's published ports, so `npm test` works from
+ * Defaults match compose.test.yml's published ports, so `npm test` works from
  * the host with the dbs profile up. Override with env vars in CI.
  */
 export const TARGETS: Record<Exclude<EngineKind, 'sqlite'>, EngineTarget> = {

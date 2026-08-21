@@ -1,17 +1,15 @@
 /**
  * End-to-end browser verification (PLAN §13 "Manual smoke", automated).
  *
- * Drives the REAL app in a real browser against the REAL engines from the
- * compose `dbs` profile. Every step screenshots, so a failure is diagnosable
+ * Drives the REAL app in a real browser against the REAL engines from
+ * compose.test.yml. Every step screenshots, so a failure is diagnosable
  * from the artefacts alone.
  *
  * Run from a Playwright container attached to the compose network:
  *   docker run --rm --network database-admin_dbadmin -v "$PWD":/w -w /w \
  *     mcr.microsoft.com/playwright:v1.56.0-noble node tests/e2e/browser-verify.mjs
  *
- * APP_URL defaults to compose.yml's `app` service on the compose network. Set
- * APP_URL=http://devapp:3456 to drive compose.dev.yml's HMR stack instead —
- * the two use different service names so their containers never collide.
+ * APP_URL defaults to compose.yml's `app` service on the compose network.
  * Because the test runs inside a container, "localhost" would mean the test
  * container itself — the same §10.3 trap the app warns users about.
  */

@@ -50,7 +50,7 @@ body:
       label: How are you running it
       options:
         - Docker (compose.yml, production image)
-        - Docker (compose.dev.yml, dev stack)
+        - Host (npm run dev)
         - Directly on the host with npm
     validations:
       required: true
