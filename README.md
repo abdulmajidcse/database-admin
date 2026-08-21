@@ -179,11 +179,15 @@ Back up `/data/app` and you have backed up the whole app.
 
 **Browse** — lazy object tree (databases → schemas → tables → columns/indexes/keys, routines,
 sequences, triggers, enums), virtualized data grid with server-side paging, sorting and filtering,
-and viewers for JSON, binary and images.
+and viewers for JSON, binary and images. Right-click a cell to follow a foreign key to the row it
+references, or to find every row that references *it*.
 
 **Query** — CodeMirror editor with schema-aware autocomplete (including table aliases), run
 statement-under-cursor / selection / whole script, multiple result tabs, real cancellation, pinned
-transaction sessions, and searchable history.
+transaction sessions, and searchable history. `⌘⇧F` formats the selection or the buffer — and
+refuses to write back anything that changed what the statements *do*. Write `:name` anywhere and a
+parameters bar appears; the values are bound by the driver and never become SQL text. Snippets
+complete by prefix, per engine.
 
 **Edit** — inline cell editing accumulates into a changeset; *Preview* shows the exact SQL and the
 rows each statement should touch; *Apply* runs it in one transaction and aborts on an affected-rows
@@ -201,9 +205,16 @@ TTL control, a real CLI console, and live `MONITOR` / pub-sub.
 **MongoDB** — collection browser, table *and* document views, Extended JSON filters, an aggregation
 pipeline builder with explain, and index management.
 
+**Generate** — the object tree writes SELECT/INSERT/UPDATE/DELETE for any table, with `:name`
+placeholders ready for the parameters bar. The grid copies a selection as INSERT, UPDATE, JSON, CSV
+or Markdown, keeping big integers as digits rather than the floats they would round to.
+
 **Power tools** — ER diagram, EXPLAIN visualizer with a flame view, live session/process monitor,
 and schema compare that generates an ordered migration script with destructive statements quarantined
 behind an explicit opt-in.
+
+Press `?` for the keyboard map. It is generated from the same table that declares the bindings, so
+it cannot drift out of date.
 
 ---
 
