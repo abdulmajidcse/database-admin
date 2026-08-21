@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # The image is the delivery path, so a Dockerfile that stops building is
       # a broken release even when the source typechecks. Build only — pushing
