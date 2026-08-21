@@ -13,14 +13,22 @@ concurrency:
 
 jobs:
   checks:
-    name: Typecheck and unit tests
+    # package.json declares `engines: >=22`, .nvmrc pins 22 for host development
+    # and the image ships 26. Testing only one of those lets a version-specific
+    # break through on the other, which is how the runtime and the test matrix
+    # drifted apart when the base image was bumped.
+    name: Typecheck and unit tests (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '26']
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - run: npm ci
@@ -34,20 +42,58 @@ jobs:
       - run: npm test
 
   image:
-    name: Docker image builds
+    name: Docker image builds and runs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v4
 
+      # Both compose files are user-facing entry points; a typo in either only
+      # shows up when somebody runs it, which is too late.
+      - name: Validate the compose files
+        run: |
+          docker compose -f compose.yml config >/dev/null
+          docker compose -f compose.test.yml config >/dev/null
+
       # The image is the delivery path, so a Dockerfile that stops building is
-      # a broken release even when the source typechecks. Build only — pushing
-      # anywhere is out of scope for CI.
+      # a broken release even when the source typechecks. Loaded rather than
+      # discarded so the next step can actually start it.
       - uses: docker/build-push-action@v7
         with:
           context: .
           target: runtime
           push: false
+          load: true
+          tags: database-admin:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Building is not running. A container that compiles and then dies on
+      # boot — a missing runtime dep, a bad CMD, a server that throws before it
+      # listens — passes a build-only job and fails every user.
+      - name: Smoke-test the image
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 127.0.0.1:3999:3999 \
+            -e PORT=3999 -v smoke-data:/data/app database-admin:ci
+          for i in $(seq 1 45); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+              http://127.0.0.1:3999/api/health || true)
+            if [ "$code" = "200" ]; then
+              echo "healthy after ~$((i * 2))s"
+              curl -s http://127.0.0.1:3999/api/health; echo
+              root=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3999/)
+              [ "$root" = "200" ] || { echo "root returned $root"; exit 1; }
+              echo "root served 200"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the container never became healthy"
+          docker logs smoke
+          exit 1
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs smoke || true
