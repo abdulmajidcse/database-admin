@@ -7,7 +7,7 @@
 # detection always succeeds instead of degrading to the built-in engine.
 
 # ---------------------------------------------------------------------------
-FROM node:22-bookworm-slim AS deps
+FROM node:26-bookworm-slim AS deps
 WORKDIR /app
 # Build toolchain for native modules (better-sqlite3). Removed with the stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -23,7 +23,7 @@ COPY . .
 RUN npm run build
 
 # ---------------------------------------------------------------------------
-FROM node:22-bookworm-slim AS runtime
+FROM node:26-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
     DBADMIN_HOME=/data/app \
