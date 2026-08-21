@@ -18,11 +18,19 @@ import { runAsUser } from './src/server/context';
 import { attachWebSocketHub, WS_USER, type UpgradeRequest } from './src/server/ws/hub';
 
 const dev = process.env.NODE_ENV !== 'production';
-const app = next({ dev, hostname: CONFIG.host, port: CONFIG.port });
+// `webpack: true` is only accepted from a custom server, and it pins dev to the
+// same bundler `npm run build` already uses (--webpack). Next 16 defaults dev to
+// Turbopack, which cannot statically resolve the SQLite worker entry
+// (connectors/sqlite/index.ts) and falls back to globbing the repo root — pulling
+// LICENSE, PLAN.md and vitest.config.ts into an API route until it 500s.
+const app = next({ dev, webpack: true, hostname: CONFIG.host, port: CONFIG.port });
 const handle = app.getRequestHandler();
 
 async function main(): Promise<void> {
   await app.prepare();
+  // Only valid after prepare(). Next owns its own upgrades — Turbopack's
+  // HMR socket at /_next/hmr (dev only).
+  const upgradeNext = app.getUpgradeHandler();
   await autoProvisionForTests();
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -69,6 +77,15 @@ async function main(): Promise<void> {
   server.on('upgrade', (req, socket, head) => {
     const { pathname } = parse(req.url ?? '/');
     if (pathname !== '/ws') {
+      // Next's dev runtime opens its own WebSocket (Turbopack HMR, /_next/hmr).
+      // Destroying it does not merely disable hot reload: the dev runtime never
+      // finishes booting, so the app never hydrates and the page sits on its
+      // loading spinner for ever. Hand those upgrades to Next and keep
+      // destroying everything else — an unknown upgrade path is still refused.
+      if (dev && pathname?.startsWith('/_next')) {
+        void upgradeNext(req, socket, head);
+        return;
+      }
       socket.destroy();
       return;
     }
