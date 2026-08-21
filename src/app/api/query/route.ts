@@ -25,9 +25,11 @@ import { randomUUID } from 'node:crypto';
 
 import type { QueryResponse } from '@/lib/api-types';
 import type { StatementResult } from '@/lib/results';
+import type { Cell } from '@/lib/wire';
 import { connectionManager } from '@/server/db/manager';
 import { invalidate as invalidateSchema } from '@/server/db/schema-cache';
 import { classifyStatement, dialectForEngine, splitStatements, type StatementKind } from '@/server/db/sql/lexer';
+import { bindStatement } from '@/server/db/sql/bind';
 import { DbError, isSqlConnector } from '@/server/db/types';
 import { connectionsRepo, historyRepo } from '@/server/store/db';
 import {
@@ -75,6 +77,15 @@ export async function POST(req: Request): Promise<Response> {
      */
     const continueOnError = body.continueOnError === true;
 
+    /**
+     * Bind parameters (docs/roadmap.md M10). Also not on the frozen
+     * QueryRequest, so read off the raw body. A map of name → value for
+     * `:name` placeholders; absent means the statement has none, and a
+     * statement that does have them then fails with a named BindError rather
+     * than reaching the driver with unbound text.
+     */
+    const paramValues = asRecord(body.params ?? {}) as Record<string, Cell>;
+
     const config = connectionsRepo.get(connectionId);
     if (!config) throw notFound(`No such connection: ${connectionId}`);
 
@@ -121,12 +132,16 @@ export async function POST(req: Request): Promise<Response> {
         const statement = statements[index];
         const startedAt = Date.now();
         try {
-          const result = await connector.query(statement, {
+          // Rewritten by offset, never by substitution: the value stays a bound
+          // parameter and cannot become SQL.
+          const bound = bindStatement(statement, dialect, connector.kind, paramValues);
+          const result = await connector.query(bound.sql, {
             maxRows,
             runId: run.runId,
             sessionId,
             database,
             schema,
+            params: bound.params,
             signal: run.signal,
           });
           const durationMs = Date.now() - startedAt;

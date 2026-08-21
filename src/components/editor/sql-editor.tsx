@@ -34,6 +34,7 @@ import { AlertTriangle, PlugZap } from 'lucide-react';
 import { api } from '@/lib/api-client';
 import type { SchemaResponse } from '@/lib/api-types';
 import type { EngineKind, SchemaModel } from '@/lib/schema-model';
+import type { Cell } from '@/lib/wire';
 import { Button, ConfirmDialog, EmptyState } from '@/components/ui/primitives';
 import { registerTabView, registerWorkspaceSlot, type SlotProps, type TabViewProps } from '@/components/shell/workspace';
 import { useConnections } from '@/components/shell/connection-sidebar';
@@ -56,6 +57,7 @@ import { statementAtOffset, type SqlDialect } from '@/server/db/sql/lexer';
 import { FormatRefusedError, formatSql } from '@/server/db/sql/format';
 import { lexerDialect, sqlLanguageExtension } from './completion';
 import { EditorToolbar } from './editor-toolbar';
+import { ParamsBar } from './params-bar';
 import { ResultTabs } from './result-tabs';
 
 // ---------------------------------------------------------------------------
@@ -398,6 +400,9 @@ export function SqlWorkspace({ tab }: TabViewProps) {
   const database = typeof tab.state.database === 'string' ? tab.state.database : undefined;
   const schema = typeof tab.state.schema === 'string' ? tab.state.schema : undefined;
   const txMode = tab.state.txMode === true;
+  // Kept on the tab so a reload does not lose the values you just typed, the
+  // same way the SQL itself and the transaction toggle are kept.
+  const paramValues = (tab.state.params ?? {}) as Record<string, Cell>;
 
   const setSql = React.useCallback(
     (next: string) => useWorkspaceStore.getState().setTabState(tab.id, { sql: next }),
@@ -446,11 +451,14 @@ export function SqlWorkspace({ tab }: TabViewProps) {
    * every SELECT trains people to type the phrase without reading it.
    */
   const launch = React.useCallback(
-    (spec: RunSpec): void => {
+    (rawSpec: RunSpec): void => {
       if (!tab.connectionId) {
         toast.error('Pick a connection for this tab first.');
         return;
       }
+      // Every run path funnels through here, so the bind values are attached
+      // once rather than at each of the three call sites.
+      const spec: RunSpec = { ...rawSpec, params: paramValues };
       const verdict = runner.destructive(spec.sql);
       const prodWrite = connection?.envTag === 'prod' && runner.writes(spec.sql);
       if (!verdict.destructive && !prodWrite) {
@@ -629,6 +637,13 @@ export function SqlWorkspace({ tab }: TabViewProps) {
           </Button>
         </div>
       )}
+
+      <ParamsBar
+        sql={sql}
+        dialect={lexerDialect(engine)}
+        values={paramValues}
+        onChange={(next) => useWorkspaceStore.getState().setTabState(tab.id, { params: next })}
+      />
 
       <div className="min-h-0 flex-1 overflow-hidden">
         {tab.connectionId ? (
