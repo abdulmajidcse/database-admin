@@ -362,7 +362,8 @@ main process later without touching a line.
 
 ## Contributing
 
-Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers getting a working copy, the
+Contributions are welcome. [docs/roadmap.md](docs/roadmap.md) lists what is missing and why, if you
+are looking for something to pick up. [CONTRIBUTING.md](CONTRIBUTING.md) covers getting a working copy, the
 checks to run before opening a pull request, and a handful of things that are easy to get wrong
 here — the two compose files sharing a project name, and never hardcoding your own connection names
 into the end-to-end tests.

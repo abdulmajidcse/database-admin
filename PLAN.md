@@ -534,6 +534,9 @@ Tests run on the host (or in CI) against the built image — **not inside the ap
 
 ## 14. Deferred / open
 
+Work beyond M9 is planned in [docs/roadmap.md](docs/roadmap.md), which supersedes the loose ends
+below where the two overlap.
+
 - Packaging as a desktop app (Electron/Tauri) — the `src/server` boundary keeps this cheap if you want it later.
 - Multi-user + audit log — same.
 - More engines: ClickHouse, DuckDB, Cassandra, DynamoDB, MSSQL. Adding one should be "implement `Connector`, register it, done" — if it isn't, the abstraction leaked.
