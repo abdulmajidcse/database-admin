@@ -18,7 +18,7 @@
 
 import type { EngineKind, TableModel } from '../../../lib/schema-model';
 import type { Cell, Row } from '../../../lib/wire';
-import { decodeCellForSql } from './changeset';
+import { decodeCellForSql } from './literal';
 import { quoteIdent, quoteQualified, quoterFor } from './quote';
 
 /** Where a statement is aimed. `schema` is optional because SQLite has none. */

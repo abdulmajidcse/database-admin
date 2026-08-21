@@ -53,6 +53,35 @@
  */
 
 import { Buffer } from 'node:buffer';
+import {
+  decodeCell,
+  NUMERIC_TEXT,
+  decodeCellForSql as decodeCellIso,
+  paramStyleFor,
+  UnwritableCellError,
+  type DecodedCell,
+} from './literal';
+
+export { paramStyleFor, UnwritableCellError };
+
+/**
+ * The server-side decoder. Identical to the isomorphic one except that bytes
+ * come back as a Buffer, which is what pg, mysql2 and better-sqlite3 bind —
+ * `literal.ts` cannot produce one because it also loads in the browser.
+ */
+export function decodeCellForSql(cell: Cell, quote?: QuoteFns): DecodedCell {
+  const decoded = decodeCellIso(cell, quote);
+  return { sql: decoded.sql, param: driverParam(decoded.param) };
+}
+export type { DecodedCell };
+
+/**
+ * The decoder is isomorphic so the grid can import it; the drivers want a
+ * Buffer. This is the one place that conversion happens.
+ */
+function driverParam(value: unknown): unknown {
+  return value instanceof Uint8Array && !Buffer.isBuffer(value) ? Buffer.from(value) : value;
+}
 
 import type { ChangePreview, Changeset, RowKey } from '../../../lib/results';
 import type { ColumnModel, EngineKind } from '../../../lib/schema-model';
@@ -94,12 +123,6 @@ export interface ChangesetOptions {
 }
 
 /** A value that cannot be written back at all (e.g. an `unsupported` cell). */
-export class UnwritableCellError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'UnwritableCellError';
-  }
-}
 
 /** Thrown by the apply path when a statement touched the wrong number of rows. */
 export class AffectedRowsMismatchError extends Error {
@@ -119,9 +142,7 @@ export class AffectedRowsMismatchError extends Error {
 }
 
 /** `?` for mysql2/better-sqlite3, `$n` for pg. */
-export function paramStyleFor(engine: EngineKind): ParamStyle {
-  return engine === 'postgres' ? 'dollar' : 'qmark';
-}
+
 
 /**
  * Step 3/4 of the apply contract. Call it right after each statement, still
@@ -142,149 +163,14 @@ export function checkAffected(actual: number, statement: PreparedStatement, inde
  * The two are NOT interchangeable. `param` is what executes; `sql` exists for
  * the preview pane, generated DDL and dump files.
  */
-export interface DecodedCell {
-  /** SQL literal text for this value. */
-  sql: string;
-  /** Value to bind. Never a JS number for bigint/decimal — always the string. */
-  param: unknown;
-}
 
 /**
  * A bare numeric literal is safe to inline only when the lossless text really
  * is a number; anything else (leading `+`, hex, `Infinity`, a locale comma) is
  * quoted so the engine's own input function decides what it means.
  */
-const NUMERIC_TEXT = /^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$/;
 
-/** ANSI fallback used when no engine-specific quoter was supplied. */
-function ansiLiteral(value: string): string {
-  return `'${value.split("'").join("''")}'`;
-}
 
-function literalText(
-  value: string | number | boolean | null,
-  quote: QuoteFns | undefined,
-): string {
-  if (value === null) return 'NULL';
-  if (quote) return quote.literal(value);
-  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
-  if (typeof value === 'number') return String(value);
-  return ansiLiteral(value);
-}
-
-/**
- * `bytea` uses the hex input format, which contains a backslash and therefore
- * has to go through the literal quoter so the `standard_conforming_strings`
- * question is answered in exactly one place (see quote.ts). Every other engine
- * takes the ANSI `X'…'` blob literal.
- */
-function bytesLiteral(bytes: Buffer, engine: EngineKind | undefined, quote?: QuoteFns): string {
-  const hex = bytes.toString('hex');
-  if (engine === 'postgres') return quote ? quote.literal(`\\x${hex}`) : `'\\x${hex}'`;
-  return `X'${hex}'`;
-}
-
-/** Postgres array output syntax, for the preview only. */
-function pgArrayText(items: unknown[]): string {
-  const parts = items.map((item) => {
-    if (item === null || item === undefined) return 'NULL';
-    if (Array.isArray(item)) return pgArrayText(item);
-    const text =
-      typeof item === 'object' && item !== null && '$t' in (item as Record<string, unknown>)
-        ? String((item as { v: string }).v)
-        : String(item);
-    return `"${text.split('\\').join('\\\\').split('"').join('\\"')}"`;
-  });
-  return `{${parts.join(',')}}`;
-}
-
-function decodeCell(cell: Cell, engine: EngineKind | undefined, quote?: QuoteFns): DecodedCell {
-  // `typeof` rather than `=== undefined` because `Cell` has no undefined member;
-  // the guard exists for values that reached us from untyped JSON.
-  if (cell === null || typeof cell === 'undefined') return { sql: 'NULL', param: null };
-
-  if (typeof cell === 'boolean') {
-    // better-sqlite3 refuses to bind a JS boolean (it binds numbers, strings,
-    // bigints, buffers and null only), so SQLite gets 1/0 — the same thing it
-    // stores anyway, since it has no boolean type.
-    return { sql: literalText(cell, quote), param: engine === 'sqlite' ? (cell ? 1 : 0) : cell };
-  }
-
-  if (typeof cell === 'number') {
-    if (!Number.isFinite(cell)) {
-      throw new UnwritableCellError(`${String(cell)} has no portable SQL representation`);
-    }
-    return { sql: String(cell), param: cell };
-  }
-
-  if (typeof cell === 'string') return { sql: literalText(cell, quote), param: cell };
-
-  switch (cell.$t) {
-    case 'unsupported':
-      // The read path could not represent this value losslessly, so writing it
-      // back would corrupt it. Refuse rather than guess (§6 type fidelity).
-      throw new UnwritableCellError(
-        `a value of type "${cell.of ?? 'unknown'}" was not decoded losslessly and cannot be written back`,
-      );
-
-    case 'bytes': {
-      const buf = Buffer.from(cell.v, 'base64');
-      // Buffer (a Uint8Array) is what pg, mysql2 and better-sqlite3 all accept.
-      return { sql: bytesLiteral(buf, engine, quote), param: buf };
-    }
-
-    case 'bigint':
-    case 'decimal':
-    case 'decimal128': {
-      // NEVER Number(cell.v): that is exactly the precision loss the wire
-      // format exists to prevent (§6). The lossless string is bound as-is and
-      // every engine applies the target column's type to it.
-      const text = cell.v.trim();
-      return { sql: NUMERIC_TEXT.test(text) ? text : literalText(cell.v, quote), param: cell.v };
-    }
-
-    case 'array': {
-      // `v` is JSON text (see the connectors' array encoding). node-postgres
-      // builds a correct `{…}` literal from a real JS array, including nesting
-      // and embedded quotes; other engines have no array type, so the text form
-      // is the only sensible parameter.
-      if (engine === 'postgres') {
-        let items: unknown[] | null = null;
-        try {
-          const parsed: unknown = JSON.parse(cell.v);
-          if (Array.isArray(parsed)) items = parsed;
-        } catch {
-          items = null;
-        }
-        if (items) {
-          return {
-            sql: literalText(pgArrayText(items), quote),
-            param: items.map((item) => decodeCell(item as Cell, engine, quote).param),
-          };
-        }
-      }
-      return { sql: literalText(cell.v, quote), param: cell.v };
-    }
-
-    default:
-      // date / time / timestamp / timestamptz / interval / json / uuid / bit /
-      // geo / objectid / regex / document: the lossless text is bound and the
-      // engine coerces it using the target column's input function. An untyped
-      // literal does the same thing in the rendered form, so no cast is needed
-      // — and an explicit one would be wrong as often as it was right (jsonb vs
-      // json, timestamptz vs timestamp).
-      return { sql: literalText(cell.v, quote), param: cell.v };
-  }
-}
-
-/**
- * Public entry point (PLAN §6). Pass the engine's quoter to get engine-exact
- * literal text; without it the literals are plain ANSI, which is enough for
- * logging but not for a preview pane.
- */
-export function decodeCellForSql(cell: Cell, quote?: QuoteFns): DecodedCell {
-  return decodeCell(cell, quote?.engine, quote);
-}
 
 // ---------------------------------------------------------------------------
 // Placeholders
@@ -455,7 +341,7 @@ function buildKeyWhere(
     const decoded = decodeCell(value, engine, quote);
     terms.push(`${ident} = ${holes.next()}`);
     displayTerms.push(`${ident} = ${decoded.sql}`);
-    params.push(decoded.param);
+    params.push(driverParam(decoded.param));
   }
 
   return { sql: terms.join(' AND '), display: displayTerms.join(' AND '), params };
@@ -518,7 +404,7 @@ export function planChangeset(
         statements.push({
           op: 'insert',
           sql: `INSERT INTO ${target} (${idents}) VALUES (${placeholders})`,
-          params: decoded.map((d) => d.param),
+          params: decoded.map((d) => driverParam(d.param)),
           display: `INSERT INTO ${target} (${idents}) VALUES (${literals})`,
           expected: 1,
         });
@@ -553,7 +439,7 @@ export function planChangeset(
         statements.push({
           op: 'update',
           sql: `UPDATE ${target} SET ${sets} WHERE ${where.sql}`,
-          params: [...decoded.map((d) => d.param), ...where.params],
+          params: [...decoded.map((d) => driverParam(d.param)), ...where.params],
           display: `UPDATE ${target} SET ${setDisplay} WHERE ${where.display}`,
           expected: 1,
         });

@@ -17,7 +17,7 @@
 
 import type { EngineKind } from '../../../lib/schema-model';
 import type { Cell } from '../../../lib/wire';
-import { paramStyleFor } from './changeset';
+import { paramStyleFor } from './literal';
 import { findPlaceholders, type SqlDialect } from './lexer';
 
 export class BindError extends Error {
