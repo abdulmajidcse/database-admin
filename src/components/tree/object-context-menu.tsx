@@ -29,6 +29,7 @@ import {
   Download,
   FileCode,
   Network,
+  SquareCode,
   RefreshCw,
   Table2,
   Trash2,
@@ -40,6 +41,12 @@ import type { ConnectionConfig } from '@/lib/connection';
 import type { TreeNode, TreeNodeKind } from '@/lib/results';
 import type { EngineKind, SchemaModel, TableModel } from '@/lib/schema-model';
 import { findTable } from '@/lib/schema-model';
+import {
+  renderDeleteTemplate,
+  renderInsertTemplate,
+  renderSelectTemplate,
+  renderUpdateTemplate,
+} from '@/server/db/sql/dml';
 import { Button, Checkbox, Dialog, ConfirmDialog, Field, Input, Select, cn } from '@/components/ui/primitives';
 import { fetchSchema } from '@/hooks/use-schema';
 import { useWorkspaceStore } from '@/state/workspace-store';
@@ -632,6 +639,47 @@ export function ObjectContextMenu({ target, x, y, onClose, onRefresh }: ObjectCo
     }
   }
 
+  /**
+   * Generate a DML statement for a table and drop it in a new SQL tab
+   * (docs/roadmap.md M10). Templates carry `:name` placeholders, so the params
+   * bar picks them up and the statement is ready to bind rather than ready to
+   * hand-edit.
+   */
+  async function generateDml(
+    current: ObjectTarget,
+    verb: 'select' | 'insert' | 'update' | 'delete',
+  ): Promise<void> {
+    try {
+      const engine = current.connection?.engine;
+      if (!engine) throw new Error('This connection is not open.');
+      const ref = objectRef(current.node);
+      const name = DATA_KINDS.includes(current.node.kind) ? ref.name : ref.table;
+      const { model } = await fetchSchema(client, current.connectionId);
+      const table = name ? findTable(model, ref.schema, name) : undefined;
+      if (!table) {
+        throw new Error(`${name ?? current.node.label} is not in the introspected schema — refresh and try again.`);
+      }
+      const sql =
+        verb === 'select'
+          ? renderSelectTemplate(table, engine)
+          : verb === 'insert'
+            ? renderInsertTemplate(table, engine)
+            : verb === 'update'
+              ? renderUpdateTemplate(table, engine)
+              : renderDeleteTemplate(table, engine);
+      useWorkspaceStore.getState().openTab({
+        kind: 'sql',
+        title: `${verb.toUpperCase()} ${table.name}`,
+        connectionId: current.connectionId,
+        state: { sql },
+      });
+    } catch (err) {
+      // renderUpdateTemplate and renderDeleteTemplate refuse a table with no
+      // primary key, and that refusal is the useful message here.
+      toast.error(err instanceof Error ? err.message : 'Could not generate the statement.');
+    }
+  }
+
   const items = React.useMemo<MenuItem[]>(() => {
     if (!target) return [];
     const node = target.node;
@@ -676,6 +724,19 @@ export function ObjectContextMenu({ target, x, y, onClose, onRefresh }: ObjectCo
           icon: <FileCode className="size-3.5" />,
           run: () => showDdl(target),
         });
+      }
+
+      // Only tables and views have rows to select from; a sequence or an enum
+      // has no DML worth generating.
+      if (DATA_KINDS.includes(node.kind) || node.kind === 'column') {
+        for (const verb of ['select', 'insert', 'update', 'delete'] as const) {
+          list.push({
+            id: `generate-${verb}`,
+            label: `Generate ${verb.toUpperCase()}`,
+            icon: <SquareCode className="size-3.5" />,
+            run: () => generateDml(target, verb),
+          });
+        }
       }
     }
 
