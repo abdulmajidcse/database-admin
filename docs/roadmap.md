@@ -24,32 +24,37 @@ three tools do.
 
 ---
 
-## 2. M10 — Everyday data work
+## 2. M10 — Everyday data work — **done**
 
-The features you reach for hourly and notice the absence of immediately.
-
-| Feature | State today |
+| Feature | Where it landed |
 | --- | --- |
-| Foreign-key navigation | Absent. The schema cache already carries `foreignKeys`; nothing consumes them for navigation |
-| Copy as INSERT / JSON / CSV / Markdown | `data-grid.tsx` copies TSV only |
-| SQL formatter | Absent |
-| Generate SELECT/INSERT/UPDATE from a tree object | Absent; the context menu offers "Open DDL" and stops there |
-| Snippets / live templates | Absent |
-| Bind parameters | Absent end to end — but `RunOpts.params` exists and all three SQL connectors already honor it, so this is lexer + API + UI only |
-| Keyboard map | Absent. Bindings are scattered across five files with no registry |
+| Foreign-key navigation | Right-click a cell: outward to the referenced row, inward to everything referencing it |
+| Copy as INSERT / UPDATE / JSON / CSV / Markdown | Grid toolbar; `⌘C` and `⌘⇧C` unchanged |
+| SQL formatter | `⌘⇧F`, selection or whole buffer, verified before it is written back |
+| Generate SELECT/INSERT/UPDATE/DELETE | Object tree, beside Open DDL |
+| Bind parameters | Params bar above the editor, appearing only when the SQL has `:name` |
+| Snippets | Completion source, per account, optionally per engine |
+| Keyboard map | `?`, rendered from the registry that now declares every binding |
 
-**Three shared modules carry it.** `sql/dml.ts` renders DML from a `TableModel` plus rows, which
-is the same operation behind both copy-as-INSERT and generate-SQL — one renderer, two entry
-points. `sql/format.ts` wraps a formatter and re-tokenizes its output with the existing
-`splitStatements`, refusing any format that changes the statement count or kinds, so a formatter
-bug can never corrupt a buffer. A shortcut registry declares every binding as data and drives
-both the handlers and a generated cheat sheet, because a hand-maintained sheet is wrong the first
-time someone adds a key.
+Three shared modules carry it. `sql/dml.ts` renders DML from a `TableModel` plus
+rows — the same operation behind both copy-as-INSERT and generate-SQL, so one
+renderer serves two entry points and both inherit the changeset builder's
+lossless literal handling. `sql/format.ts` wraps a formatter and re-tokenizes
+its output with `splitStatements`, refusing any result that changed the
+statement count or kinds. `shell/shortcuts.ts` declares every binding as data
+and generates the cheat sheet, because a hand-maintained sheet is wrong the
+first time somebody adds a key.
 
-**Done when** you can click a foreign key and land on the referenced row, copy a selection as an
-`INSERT`, and press `?` to see every shortcut.
+`sql/bind.ts` rewrites `:name` to the engine's own placeholder style using the
+offsets `findPlaceholders` returns, so a `:id` inside a string literal is left
+alone and a value containing SQL is bound as characters.
 
----
+Two things this turned up. A SQL formatter already existed — hand-rolled, with
+its own second tokenizer, inside `sql-editor.tsx`, unverified, and bailing out
+entirely on MySQL `DELIMITER` scripts; it has been replaced rather than
+duplicated. And `⌘J` toggled the results panel while being documented nowhere.
+
+Test count went from 216 to 298.
 
 ## 3. M11 — Object management
 
