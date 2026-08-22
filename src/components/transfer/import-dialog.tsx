@@ -45,13 +45,14 @@ import { FilePathField, baseName } from './file-picker';
 import { CsvMapping, buildMappings } from './csv-mapping';
 import { openJobsDrawer } from './jobs-drawer';
 
-type SourceKind = 'csv' | 'json' | 'ndjson' | 'sql' | 'dump' | 'bundle';
+type SourceKind = 'csv' | 'json' | 'ndjson' | 'xlsx' | 'sql' | 'dump' | 'bundle';
 type Step = 'source' | 'mapping' | 'options';
 
 const SOURCE_KINDS: { id: SourceKind; label: string }[] = [
   { id: 'csv', label: 'CSV / TSV / delimited text' },
   { id: 'json', label: 'JSON array' },
   { id: 'ndjson', label: 'NDJSON (one document per line)' },
+  { id: 'xlsx', label: 'Excel workbook (.xlsx) — first sheet' },
   { id: 'sql', label: 'SQL script' },
   { id: 'dump', label: 'Database dump (pg_dump / mysqldump)' },
   { id: 'bundle', label: 'Folder of CSVs — one table per file' },
@@ -83,8 +84,24 @@ function namesOwnTargets(kind: SourceKind): boolean {
   return isScript(kind) || kind === 'bundle';
 }
 
+/**
+ * Sources the wizard maps in the browser, which needs /api/csv/preview to have
+ * read the file first — so only CSV.
+ *
+ * XLSX has a header row and fixed columns and could be mapped the same way, but
+ * the preview endpoint does not read workbooks, so it takes the server-side
+ * path that JSON and NDJSON already use: deriveMapping() reads the first sheet
+ * and maps header to column by name. Worth revisiting if column mapping for
+ * spreadsheets turns out to matter; it needs a preview endpoint, not a change
+ * here.
+ */
+function hasMapping(kind: SourceKind): boolean {
+  return kind === 'csv';
+}
+
 function kindFromPath(path: string): SourceKind {
   const lower = path.toLowerCase();
+  if (lower.endsWith('.xlsx') || lower.endsWith('.xlsm')) return 'xlsx';
   if (lower.endsWith('.ndjson') || lower.endsWith('.jsonl')) return 'ndjson';
   if (lower.endsWith('.json')) return 'json';
   if (lower.endsWith('.sql') || lower.endsWith('.sql.gz')) return 'sql';
@@ -269,7 +286,7 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
   // fixed, so stranding the user on step 1 would be worse than useless.
   /** Both of these key a row before writing it; neither can guess the key. */
   const needsKeys = onConflict === 'upsert' || onConflict === 'replace';
-  const unmapped = kind === 'csv' && mapping.length > 0 && mapping.every((m) => m.targetColumn === null);
+  const unmapped = hasMapping(kind) && mapping.length > 0 && mapping.every((m) => m.targetColumn === null);
   const submitProblems = unmapped
     ? [...problems, 'Map at least one column to a target column — nothing would be written.']
     : problems;
@@ -311,7 +328,7 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
         // blank column still needs a stable name, and `sourceIndex` is what the
         // loader actually matches on.
         mapping:
-          kind === 'csv' && mapping.length > 0
+          hasMapping(kind) && mapping.length > 0
             ? mapping.map((m) => ({ ...m, sourceName: m.sourceName || `column_${m.sourceIndex + 1}` }))
             : undefined,
         options: {
@@ -325,7 +342,7 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
           useFastPath,
         } satisfies ImportOptions,
         csv:
-          kind === 'csv'
+          hasMapping(kind)
             ? {
                 ...(edits.delimiter && edits.delimiter.length === 1 ? { delimiter: edits.delimiter } : {}),
                 ...(edits.quote && edits.quote.length === 1 ? { quote: edits.quote } : {}),

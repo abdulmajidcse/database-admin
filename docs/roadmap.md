@@ -79,10 +79,11 @@ bundle reader and writer), so what remains here is narrower than when this was w
 - **Cross-engine table-to-table copy.** Already typed as `CopyJobParams` in `jobs/types.ts`,
   citing PLAN §7.6 as the stretch goal. The pipeline and the canonical model that does
   the type mapping both exist. What is missing is a UI and the wiring.
-- **XLSX import.** Export writes eight formats (`csv`, `tsv`, `json`, `ndjson`, `xlsx`,
-  `markdown`, `html`, `sql`). Import now reads `csv`, `json`, `ndjson`, `sql`, `dump` and
-  `bundle` — a directory of per-table files — so only XLSX is left. JSON, NDJSON and bundle
-  import arrived with the whole-database transfer work, not with this milestone.
+- ~~**XLSX import.**~~ **Done.** Import reads `csv`, `json`, `ndjson`, `xlsx`, `sql`, `dump`
+  and `bundle`, so every format export writes can now be read back except the two that are
+  presentation-only (`markdown`, `html`). The reader streams through exceljs' `WorkbookReader`
+  and is mapped server-side, the way JSON and NDJSON are — mapping a workbook in the wizard
+  would need a preview endpoint that reads sheets, which does not exist.
 - **Data compare and sync.** Schema compare exists. Row-level diff between two tables, with a
   generated reconciliation script, does not.
 

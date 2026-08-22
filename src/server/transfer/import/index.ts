@@ -69,6 +69,7 @@ import {
   syntheticHeaders,
   type CsvDialect,
 } from './csv';
+import { previewXlsx, readXlsxRows } from './xlsx';
 import {
   ImportCancelled,
   loadRows,
@@ -699,6 +700,13 @@ function sourceRows(
       onProgress: opts.onProgress,
     });
   }
+  if (kind === 'xlsx') {
+    return readXlsxRows(file, mapping, {
+      batchSize: opts.batchSize,
+      signal: opts.signal,
+      onProgress: opts.onProgress,
+    });
+  }
   return readJsonRows(file, dialect, mapping, opts);
 }
 
@@ -710,6 +718,12 @@ async function deriveMapping(
   if (kind === 'csv') {
     const preview = await previewCsv(file, dialect, PREVIEW_ROWS);
     return defaultMapping(preview.headers, inferColumnTypes(preview.rows, dialect.nullLiteral));
+  }
+  if (kind === 'xlsx') {
+    // Types are inferred from the sampled text exactly as for CSV: a sheet's
+    // own cell types describe the spreadsheet, not the target column.
+    const preview = await previewXlsx(file, PREVIEW_ROWS);
+    return defaultMapping(preview.headers, inferColumnTypes(preview.rows, ''));
   }
   // JSON/NDJSON: the union of the keys in the first records, in first-seen order.
   const keys: string[] = [];

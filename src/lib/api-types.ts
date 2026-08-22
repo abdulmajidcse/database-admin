@@ -290,7 +290,7 @@ export interface ImportRequest {
    * mirror of a directory export, and the only way a format holding one table
    * per file can restore a whole database.
    */
-  source: { kind: 'csv' | 'json' | 'ndjson' | 'sql' | 'dump' | 'bundle'; path: string };
+  source: { kind: 'csv' | 'json' | 'ndjson' | 'xlsx' | 'sql' | 'dump' | 'bundle'; path: string };
   target?: { schema?: string; table: string; createTable?: boolean };
   mapping?: ColumnMapping[];
   options: ImportOptions;
