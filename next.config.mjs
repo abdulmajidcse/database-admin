@@ -14,6 +14,11 @@ const nextConfig = {
     'ssh2',
     'ws',
     'exceljs',
+    // Same reason as exceljs: bundling it kills the build worker outright with a
+    // bare SIGKILL. This entry is necessary but NOT sufficient — transfer/export/
+    // zip.ts must also import it dynamically. Removing either brings the failure
+    // back; see the note there.
+    'archiver',
   ],
   // Next 16 blocks cross-origin requests to /_next/* dev resources, allowing only
   // `localhost`, `**.localhost` and the `hostname` handed to next() — which is
