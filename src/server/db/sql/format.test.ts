@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { FormatRefusedError, formatSql } from './format';
+import { FormatRefusedError, formatSql, hasDelimiterCommand } from './format';
 import { splitStatements } from './lexer';
 
 describe('formatSql', () => {
@@ -75,6 +75,17 @@ describe('formatSql', () => {
     // mangled body can still re-lex to the same statement count and kinds.
     const sql = 'DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END $$\nDELIMITER ;';
     expect(formatSql(sql, 'mysql')).toBe(sql);
+  });
+
+  it('flags a DELIMITER script so a caller formatting a fragment can bail', () => {
+    // The editor formats selections, and a selection from inside a routine body
+    // carries no DELIMITER line — so the predicate has to be applied to the
+    // whole buffer by the caller, and this is what it asks.
+    const whole = 'DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END $$';
+    expect(hasDelimiterCommand(whole, 'mysql')).toBe(true);
+    expect(hasDelimiterCommand('SELECT 1; SELECT 2', 'mysql')).toBe(false);
+    // Only MySQL has the command at all.
+    expect(hasDelimiterCommand(whole, 'postgres')).toBe(false);
   });
 
   it('still formats MySQL without a DELIMITER command', () => {

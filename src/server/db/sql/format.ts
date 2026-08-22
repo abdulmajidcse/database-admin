@@ -35,6 +35,20 @@ export interface FormatOptions {
   keywordCase?: 'upper' | 'lower' | 'preserve';
 }
 
+/**
+ * MySQL's DELIMITER is a client command, not SQL, and sql-formatter does not
+ * know it — it reads the `;` inside a routine body as a terminator and reflows
+ * the body around boundaries that are not there. The count/kind guard cannot
+ * catch that, because a mangled body can re-lex to the same shape.
+ *
+ * Exported because the caller has to test the WHOLE buffer, not the fragment
+ * being formatted: formatting a selection from inside a routine body would
+ * otherwise slip past a check that only ever saw the selection.
+ */
+export function hasDelimiterCommand(sql: string, dialect: SqlDialect): boolean {
+  return dialect === 'mysql' && /^[ \t]*delimiter[ \t]+\S/im.test(sql);
+}
+
 /** Thrown when the formatted output failed verification. The buffer is untouched. */
 export class FormatRefusedError extends Error {
   constructor(reason: string) {
@@ -72,13 +86,9 @@ export function formatSql(
   // an empty buffer formats to. Returning the input keeps the editor stable.
   if (sql.trim() === '') return sql;
 
-  // MySQL's DELIMITER is a client command, not SQL. sql-formatter does not know
-  // it, so it reads the `;` inside a routine body as a statement terminator and
-  // reflows the body around boundaries that are not there. The count/kind guard
-  // below cannot catch that — a mangled body can re-lex to the same shape — so
-  // the whole buffer is left alone, which is what the formatter this replaced
-  // did and the one behaviour worth carrying over from it.
-  if (dialect === 'mysql' && /^[ \t]*delimiter[ \t]+\S/im.test(sql)) return sql;
+  // See hasDelimiterCommand. Callers formatting a fragment must test the whole
+  // buffer themselves; this catches the whole-buffer case.
+  if (hasDelimiterCommand(sql, dialect)) return sql;
 
   const before = shapeOf(sql, dialect);
 

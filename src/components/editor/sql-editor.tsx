@@ -54,7 +54,7 @@ import {
   type RunSpec,
 } from '@/hooks/use-query-runner';
 import { statementAtOffset, type SqlDialect } from '@/server/db/sql/lexer';
-import { FormatRefusedError, formatSql } from '@/server/db/sql/format';
+import { FormatRefusedError, formatSql, hasDelimiterCommand } from '@/server/db/sql/format';
 import { lexerDialect, sqlLanguageExtension, type EditorSnippet } from './completion';
 import { EditorToolbar } from './editor-toolbar';
 import { ParamsBar } from './params-bar';
@@ -212,6 +212,15 @@ export const SqlEditor = React.forwardRef<EditorHandle, SqlEditorProps>(function
     const dialect = lexerDialect(handlers.current.engine);
     // Selection if there is one, whole document otherwise — predictable, and it
     // lets you format one statement of a long script without touching the rest.
+    // Tested against the WHOLE buffer, not the fragment about to be formatted.
+    // A selection taken from inside a routine body carries no DELIMITER line,
+    // so checking only the selection would reflow exactly the text the bail-out
+    // exists to protect.
+    if (hasDelimiterCommand(view.state.doc.toString(), dialect)) {
+      toast.message('Not formatting: this script redefines the delimiter, and reflowing a routine body would corrupt it.');
+      return;
+    }
+
     const range = view.state.selection.main;
     const hasSelection = !range.empty;
     const from = hasSelection ? range.from : 0;
