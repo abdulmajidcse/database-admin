@@ -38,3 +38,10 @@ coverage
 # OS / logs
 .DS_Store
 *.log
+
+# Editor and IDE settings. These describe one machine's setup, not the project:
+# PhpStorm rewrites .idea/workspace.xml on every cursor move, and .idea/
+# dataSources* is where it keeps database connections and their credentials.
+.idea/
+.vscode/
+*.swp
