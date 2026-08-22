@@ -37,7 +37,7 @@ import {
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const SOURCE_KINDS = ['csv', 'json', 'ndjson', 'sql', 'dump'] as const;
+const SOURCE_KINDS = ['csv', 'json', 'ndjson', 'sql', 'dump', 'bundle'] as const;
 const CONFLICTS = ['insert', 'upsert', 'replace', 'ignore'] as const;
 
 type SourceKind = (typeof SOURCE_KINDS)[number];
@@ -66,13 +66,23 @@ function parseImportRequest(raw: unknown): ParsedImport {
 }
 
 function parseTarget(raw: unknown, kind: SourceKind): ImportRequest['target'] {
+  // A bundle names a table per file, so a single target table would be wrong for
+  // every file but one. Only the schema and the create-table switch apply.
+  const selfTargeting = kind === 'sql' || kind === 'dump' || kind === 'bundle';
   if (raw === undefined || raw === null) {
     // A row source has nowhere to go without one; a script carries its own
     // targets in the SQL itself.
-    if (kind === 'sql' || kind === 'dump') return undefined;
+    if (selfTargeting) return undefined;
     throw badRequest('"target.table" is required for a CSV/JSON/NDJSON import.');
   }
   const t = asRecord(raw, '"target"');
+  if (kind === 'bundle') {
+    return {
+      schema: optionalString(t, 'schema'),
+      table: '',
+      createTable: optionalBoolean(t, 'createTable'),
+    };
+  }
   return {
     schema: optionalString(t, 'schema'),
     table: requireString(t, 'table', 'target table'),
@@ -178,7 +188,9 @@ export async function POST(req: Request): Promise<Response> {
 
     const title = isScript
       ? `Restore ${name}`
-      : `Import ${name} → ${request.target?.schema ? `${request.target.schema}.` : ''}${request.target?.table ?? ''}`;
+      : request.source.kind === 'bundle'
+        ? `Import every table in ${name}/`
+        : `Import ${name} → ${request.target?.schema ? `${request.target.schema}.` : ''}${request.target?.table ?? ''}`;
 
     // A dump is a restore, not a row import: §7.5's knobs (definers, ownership,
     // ordering) belong to `RestoreJobParams`, and the drawer labels it that way.
@@ -196,9 +208,14 @@ export async function POST(req: Request): Promise<Response> {
         }
       : {
           kind: 'import',
-          source: { kind: request.source.kind as 'csv' | 'json' | 'ndjson', path: file },
-          // Guaranteed by parseTarget for every non-script source.
-          target: request.target as { schema?: string; table: string; createTable?: boolean },
+          source: { kind: request.source.kind as 'csv' | 'json' | 'ndjson' | 'bundle', path: file },
+          // Guaranteed by parseTarget for every non-script source; a bundle
+          // fills in `table` per file from the file's own name.
+          target: (request.target ?? { table: '' }) as {
+            schema?: string;
+            table: string;
+            createTable?: boolean;
+          },
           mapping: request.mapping,
           options: request.options,
         };

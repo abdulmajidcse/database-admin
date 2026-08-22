@@ -17,6 +17,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Duplex, Writable } from 'node:stream';
 import { SQL_ENGINES, type EngineKind, type TableModel } from '../../../lib/schema-model';
@@ -54,6 +55,8 @@ import {
   type SinkHandle,
   type SinkSpec,
 } from './pipeline';
+import { createZipArchive, type ZipArchive } from './zip';
+import { INCOMPLETE_MARKER } from '../incomplete';
 
 export * from './writers';
 export * from './sql-writer';
@@ -157,6 +160,12 @@ export type ExportDestination =
   | { kind: 'file'; path: string; root?: string; overwrite?: boolean }
   /** One file per source, named after it — the natural shape for many tables. */
   | { kind: 'directory'; path: string; root?: string; overwrite?: boolean }
+  /**
+   * One ZIP entry per source, written to `stream`. The directory destination's
+   * shape for a download: a browser gets one response, and CSV keeps one header
+   * per table instead of burying the second one mid-file.
+   */
+  | { kind: 'archive'; stream: Writable; level?: number }
   | { kind: 'stream'; stream: Writable; end?: boolean };
 
 export interface ExportRequest {
@@ -524,6 +533,16 @@ async function endSnapshot(connector: SqlConnector, sessionId: string, commit: b
 // runExport
 // ---------------------------------------------------------------------------
 
+async function writeIncompleteMarker(dir: string, err: unknown): Promise<void> {
+  const reason = err instanceof Error ? err.message : String(err);
+  await writeFile(
+    path.join(dir, INCOMPLETE_MARKER),
+    `This export did not finish, so the files here are only part of the database.\n` +
+      `Do not restore from it.\n\nReason: ${reason}\n`,
+    'utf8',
+  );
+}
+
 export async function runExport(
   request: ExportRequest,
   ctx: ExportRunContext = {},
@@ -536,7 +555,9 @@ export async function runExport(
   const compress = request.compress ?? 'none';
   const content = request.content ?? 'both';
   const signal = ctx.signal;
-  const perFile = destination.kind === 'directory';
+  // Both destinations give each source its own file; they differ only in where
+  // those files land, so the whole per-source loop below is shared.
+  const perFile = destination.kind === 'directory' || destination.kind === 'archive';
 
   if (format === 'sql' && !SQL_ENGINES.includes(engine)) {
     // Identifier/literal quoting is per SQL engine; there is no correct answer
@@ -550,12 +571,25 @@ export async function runExport(
       'A JSON array export of several sources needs a directory destination — or use ndjson.',
     );
   }
+  if ((format === 'csv' || format === 'tsv') && sources.length > 1 && !perFile) {
+    // The same defect as the JSON case above, but it used to be written
+    // silently: one delimited file carries one header and one column shape, so
+    // concatenating tables buries a second header mid-file and no parser will
+    // read it back. Refusing costs the user a re-run; not refusing costs them a
+    // "successful" export they discover is unusable at restore time.
+    const label = format.toUpperCase();
+    throw new Error(
+      `A ${label} export covers one table at a time. Export as SQL or XLSX to hold every table ` +
+        `in one file, or pick a directory or archive destination to get one ${label} per table.`,
+    );
+  }
 
   const tablesTotal = sources.length;
   let tablesDone = 0;
   let rowsDone = 0;
   let bytesClosed = 0;
   let currentSink: SinkHandle | null = null;
+  let archive: ZipArchive | null = null;
   const files: string[] = [];
 
   const rowsExpected = sources.reduce((sum, s) => {
@@ -565,7 +599,11 @@ export async function runExport(
   }, 0);
 
   let lastEmit = 0;
-  const bytesOut = (): number => bytesClosed + (currentSink?.bytesWritten() ?? 0);
+  // For an archive the only number that means anything to the user is the size
+  // of the file they receive; summing the entries would report the uncompressed
+  // total and overstate a compressed archive substantially.
+  const bytesOut = (): number =>
+    archive ? archive.bytesWritten() : bytesClosed + (currentSink?.bytesWritten() ?? 0);
   const report = (phase: string, force = false): void => {
     if (!ctx.onProgress) return;
     const now = Date.now();
@@ -625,6 +663,32 @@ export async function runExport(
     });
   };
 
+  /**
+   * A filesystem-safe stem that has not been used yet in this export.
+   *
+   * `sanitizeFileStem` is lossy — `my table` and `my_table` are both legal table
+   * names in MySQL and SQLite and both become `my_table`. Left alone, the second
+   * overwrites the first for a directory destination (or becomes a duplicate zip
+   * entry that most tools silently overwrite), so a table disappears from a
+   * "whole database" export that still reports success.
+   */
+  const usedStems = new Set<string>();
+  const uniqueStem = (label: string): string => {
+    const base = sanitizeFileStem(label);
+    if (!usedStems.has(base)) {
+      usedStems.add(base);
+      return base;
+    }
+    for (let n = 2; ; n++) {
+      const candidate = `${base}-${n}`;
+      if (!usedStems.has(candidate)) {
+        usedStems.add(candidate);
+        ctx.log?.(`Two sources share the file name "${base}"; wrote this one as "${candidate}"`);
+        return candidate;
+      }
+    }
+  };
+
   const sinkSpecFor = (label: string): SinkSpec => {
     if (destination.kind === 'stream') {
       return { kind: 'stream', stream: destination.stream, end: destination.end };
@@ -637,7 +701,13 @@ export async function runExport(
         overwrite: destination.overwrite,
       };
     }
-    const name = `${sanitizeFileStem(label)}.${fileExtension(format, compress)}`;
+    if (destination.kind === 'archive') {
+      // No gzip layer inside the entry: the archive already deflates, and a
+      // `users.csv.gz` inside a .zip is a second unwrap for no gain.
+      const entryName = `${uniqueStem(label)}.${fileExtension(format, 'none')}`;
+      return { kind: 'stream', stream: archive!.entry(entryName), end: true };
+    }
+    const name = `${uniqueStem(label)}.${fileExtension(format, compress)}`;
     return {
       kind: 'file',
       path: path.join(destination.path, name),
@@ -647,7 +717,8 @@ export async function runExport(
   };
 
   const sinkOptions = {
-    compress,
+    // See sinkSpecFor: an archive entry is deflated by the archive itself.
+    compress: destination.kind === 'archive' ? ('none' as CompressionKind) : compress,
     gzipLevel: request.gzipLevel,
     keepPartial: request.keepPartial,
   };
@@ -692,13 +763,33 @@ export async function runExport(
   };
 
   try {
+    if (destination.kind === 'archive') {
+      // Opened here rather than beside `perFile` so an export refused by the
+      // format checks above never leaves a half-built archive — and never leaves
+      // the HTTP response it pipes into waiting for a central directory.
+      archive = await createZipArchive(destination.stream, { level: destination.level });
+    }
     if (perFile) {
+      const perFileWrapper = {
+        transaction: request.dumpTransaction ?? true,
+        disableForeignKeyChecks: request.disableForeignKeyChecks ?? false,
+      };
       // One sink per source; each closes before the next opens.
       for (let i = 0; i < sources.length; i++) {
         const sink = await openSink(sinkSpecFor(sourceLabel(sources[i], i)), sinkOptions);
         currentSink = sink;
         try {
+          // Each per-table script is restored on its own, so each needs its own
+          // wrapper — without it a restore failing partway through one file
+          // leaves that table half-loaded.
+          if (format === 'sql') {
+            await writeText(
+              sink.head,
+              renderDumpPrelude(engine, { ...perFileWrapper, header: `dbadmin export (${engine})` }),
+            );
+          }
           await runSource(sources[i], i, sink, null);
+          if (format === 'sql') await writeText(sink.head, renderDumpPostlude(engine, perFileWrapper));
           await sink.close();
         } catch (err) {
           await sink.abort(err);
@@ -709,6 +800,9 @@ export async function runExport(
           if (sink.path) files.push(sink.path);
         }
       }
+      // Only now is the central directory correct; until it is written the bytes
+      // on the wire are not yet a readable archive.
+      if (archive) await archive.finalize();
     } else {
       const sink = await openSink(sinkSpecFor(sourceLabel(sources[0], 0)), sinkOptions);
       currentSink = sink;
@@ -766,6 +860,21 @@ export async function runExport(
     };
   } catch (err) {
     if (sessionId && isSqlConnector(connector)) await endSnapshot(connector, sessionId, false);
+    if (archive && destination.kind === 'archive') {
+      // A failed archive must NOT be finalized: a readable zip holding half the
+      // tables is the worst outcome, because it looks like a complete backup.
+      // Destroying the stream truncates the download, which is recognisably
+      // broken to both the browser and the user.
+      destination.stream.destroy(err instanceof Error ? err : new Error(String(err)));
+    }
+    if (destination.kind === 'directory') {
+      // The same hazard, and a directory cannot be truncated the way a stream
+      // can: the tables written before the failure stay on disk, and a directory
+      // of CSVs is exactly what a bundle import consumes. Without this marker,
+      // half a database restores as though it were all of it. Best-effort — if
+      // the directory is what broke, there is nothing further to do here.
+      await writeIncompleteMarker(destination.path, err).catch(() => undefined);
+    }
     ctx.log?.(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
     throw err;
   }
