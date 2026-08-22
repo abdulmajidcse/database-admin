@@ -3,10 +3,16 @@
 /**
  * The keyboard map (PLAN §12 M9 "keyboard map"; docs/roadmap.md M10).
  *
- * Every binding in the app is declared here, once, as data. The cheat sheet is
- * rendered from this table rather than maintained beside it — a hand-written
- * sheet is wrong the first time somebody adds a key, and being wrong is worse
- * than being absent, because you stop checking it.
+ * Bindings are declared here as data and the cheat sheet is rendered from this
+ * table rather than maintained beside it.
+ *
+ * Be precise about what that buys, because the first draft of this comment
+ * overclaimed and the README repeated it: generating the sheet stops it
+ * contradicting the table. It does NOT stop the table falling behind the code,
+ * because the handlers live elsewhere and nothing cross-checks them. A binding
+ * added to the grid's switch and not added here is invisible, and this file was
+ * already missing eight of the grid's own keys when it was written. Treat it as
+ * documentation that has to be maintained, not as a source of truth.
  *
  * This is a registry, not a dispatcher. The handlers stay where they are: the
  * editor's bindings belong to CodeMirror's keymap, the grid's to its own
@@ -63,6 +69,13 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'grid.edit', keys: 'Enter', scope: 'grid', label: 'Edit the focused cell' },
   { id: 'grid.setNull', keys: 'Delete', scope: 'grid', label: 'Set the selection to NULL' },
   { id: 'grid.contextMenu', keys: 'Right click', scope: 'grid', label: 'Foreign keys, and expand' },
+  { id: 'grid.move', keys: 'Arrows', scope: 'grid', label: 'Move the selection' },
+  { id: 'grid.extend', keys: 'Shift-Arrows', scope: 'grid', label: 'Extend the selection' },
+  { id: 'grid.nextCell', keys: 'Tab', scope: 'grid', label: 'Next cell (Shift-Tab for previous)' },
+  { id: 'grid.rowEnds', keys: 'Home', scope: 'grid', label: 'First column (⌘Home for the first cell)' },
+  { id: 'grid.rowEnd', keys: 'End', scope: 'grid', label: 'Last column (⌘End for the last cell)' },
+  { id: 'grid.page', keys: 'PageDown', scope: 'grid', label: 'Page down (PageUp to go back)' },
+  { id: 'grid.clearSelection', keys: 'Escape', scope: 'grid', label: 'Clear the selection' },
 
   { id: 'redis.clear', keys: 'Mod-l', scope: 'redis', label: 'Clear the console' },
   { id: 'mongo.run', keys: 'Mod-Enter', scope: 'mongo', label: 'Run the query or pipeline' },

@@ -213,8 +213,9 @@ or Markdown, keeping big integers as digits rather than the floats they would ro
 and schema compare that generates an ordered migration script with destructive statements quarantined
 behind an explicit opt-in.
 
-Press `?` for the keyboard map. It is generated from the same table that declares the bindings, so
-it cannot drift out of date.
+Press `?` for the keyboard map. It is generated from one table of bindings rather than written out
+by hand, so the sheet and that table cannot disagree — though the table itself is maintained, not
+derived from the handlers.
 
 ---
 
