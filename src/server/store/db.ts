@@ -368,6 +368,15 @@ export const snippetsRepo = {
   upsert(s: { id?: string; prefix: string; label?: string; body: string; engines?: string[] }) {
     const now = Date.now();
     const id = s.id ?? randomUUID();
+    // The prefix is unique per owner, and ON CONFLICT(id) does not cover that
+    // index — so a duplicate would surface as a raw SQLITE_CONSTRAINT 500.
+    // Checked first so the caller gets a sentence it can show a user.
+    const clash = getDb()
+      .prepare('SELECT id FROM snippets WHERE owner_id = ? AND prefix = ? AND id <> ?')
+      .get(requireUserId(), s.prefix, id) as { id: string } | undefined;
+    if (clash) {
+      throw new Error(`A snippet with the prefix "${s.prefix}" already exists.`);
+    }
     getDb()
       .prepare(
         `INSERT INTO snippets (id, owner_id, prefix, label, body, engines, created_at, updated_at)
