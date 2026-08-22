@@ -8,7 +8,7 @@
  * happens when two files want the same name.
  */
 
-import { mkdtemp, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -103,6 +103,17 @@ describe('bundleMembers', () => {
     const members = await bundleMembers(dir);
     expect(members[0].table).toBe('users');
     expect(members[0].schema).toBe('my.db');
+  });
+
+  it('includes a symlinked data file rather than skipping it', async () => {
+    // readdir does not follow links, so isFile() is false for one and the table
+    // vanished from the import without a word — the same silent drop this
+    // module refuses loudly for a gzipped member.
+    const dir = await dirWith(['users.csv']);
+    const target = path.join(dir, 'users.csv');
+    await symlink(target, path.join(dir, 'orders.csv'));
+    const members = await bundleMembers(dir);
+    expect(members.map((m) => m.table).sort()).toEqual(['orders', 'users']);
   });
 
   it('refuses two files that would load into the same table', async () => {

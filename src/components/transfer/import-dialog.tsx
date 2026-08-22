@@ -285,7 +285,11 @@ export function ImportDialog({ open, onClose, connectionId, initialPath, initial
   // submission only, never the Next button: the mapping screen is where it gets
   // fixed, so stranding the user on step 1 would be worse than useless.
   /** Both of these key a row before writing it; neither can guess the key. */
-  const needsKeys = onConflict === 'upsert' || onConflict === 'replace';
+  // A bundle derives each member's key from that table's primary key, and both
+  // this dialog and bundleMemberOverrides drop whatever is typed here — so the
+  // field must not be shown for one, or it asks for a value guaranteed to be
+  // ignored.
+  const needsKeys = (onConflict === 'upsert' || onConflict === 'replace') && kind !== 'bundle';
   const unmapped = hasMapping(kind) && mapping.length > 0 && mapping.every((m) => m.targetColumn === null);
   const submitProblems = unmapped
     ? [...problems, 'Map at least one column to a target column — nothing would be written.']

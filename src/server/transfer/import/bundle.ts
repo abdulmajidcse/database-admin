@@ -64,7 +64,12 @@ export async function bundleMembers(dir: string): Promise<BundleMember[]> {
   const compressed: string[] = [];
 
   for (const entry of entries) {
-    if (!entry.isFile()) continue;
+    // A symlink to a CSV is a file for our purposes: readdir does not follow
+    // links, so `isFile()` is false for one and the member vanished from the
+    // import without a word. This module refuses rather than skips for a
+    // gzipped member for exactly that reason — dropping a table from a
+    // whole-database restore is the failure it exists to prevent.
+    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
     if (isCompressedData(entry.name)) {
       compressed.push(entry.name);
       continue;
