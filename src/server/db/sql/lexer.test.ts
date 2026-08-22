@@ -753,3 +753,31 @@ describe('findPlaceholders', () => {
     expect(sql.slice(p.start, p.end)).toBe(':id');
   });
 });
+
+describe('findPlaceholders — operators that are not placeholders', () => {
+  it('does not read the Postgres jsonb ? operator as a placeholder', () => {
+    // `?` is key-exists in Postgres, which binds with $n and never with ?.
+    expect(findPlaceholders("SELECT data ? 'key' FROM t", 'postgres')).toEqual([]);
+  });
+
+  it('does not read ?| or ?& as placeholders in any dialect', () => {
+    expect(findPlaceholders("SELECT a ?| array['x'] FROM t", 'postgres')).toEqual([]);
+    expect(findPlaceholders("SELECT a ?& array['x'] FROM t", 'postgres')).toEqual([]);
+    expect(findPlaceholders('SELECT a ?| b', 'mysql')).toEqual([]);
+  });
+
+  it('still finds ? where it really is a placeholder', () => {
+    expect(findPlaceholders('SELECT * FROM t WHERE a = ?', 'mysql')).toHaveLength(1);
+    expect(findPlaceholders('SELECT * FROM t WHERE a = ?', 'sqlite')).toHaveLength(1);
+  });
+
+  it('does not read an array slice bound as a named placeholder', () => {
+    // arr[lo:hi] — `hi` follows an identifier character, so it is a slice bound.
+    expect(findPlaceholders('SELECT arr[lo:hi] FROM t', 'postgres')).toEqual([]);
+  });
+
+  it('still finds a named placeholder after an operator or space', () => {
+    expect(findPlaceholders('SELECT * FROM t WHERE a = :hi', 'postgres')).toHaveLength(1);
+    expect(findPlaceholders('SELECT * FROM t WHERE a=:hi', 'postgres')).toHaveLength(1);
+  });
+});

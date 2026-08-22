@@ -86,6 +86,19 @@ describe('bindStatement', () => {
     expect(() => bindStatement('SELECT ?, ?', 'mysql', 'mysql', {}, [1])).toThrow(BindError);
   });
 
+  it('passes a positional statement through when no values were supplied', () => {
+    // Binding is opt-in. Refusing here would break every script containing a
+    // `?` the user never meant as a placeholder.
+    const out = bindStatement('SELECT ?, ?', 'mysql', 'mysql', {});
+    expect(out.sql).toBe('SELECT ?, ?');
+    expect(out.params).toEqual([]);
+  });
+
+  it('leaves a Postgres jsonb ? operator alone', () => {
+    const sql = "SELECT data ? 'key' FROM t";
+    expect(bindStatement(sql, 'postgres', 'postgres', {}).sql).toBe(sql);
+  });
+
   it('ignores a Postgres cast while binding around it', () => {
     const out = bindStatement("SELECT '1'::int, :a", 'postgres', 'postgres', { a: 2 });
     expect(out.sql).toBe("SELECT '1'::int, $1");

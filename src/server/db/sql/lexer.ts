@@ -954,6 +954,16 @@ export function findPlaceholders(sql: string, dialect: SqlDialect): SqlPlacehold
     }
 
     if (c === '?') {
+      // `?` is only a placeholder where the engine actually binds with one.
+      // Postgres numbers its parameters ($n) and uses `?`, `?|` and `?&` as
+      // jsonb operators, so reading one as a placeholder breaks a working
+      // query. `?|` and `?&` are operators everywhere, so they are skipped in
+      // every dialect.
+      const next = at(sql, i + 1);
+      if (dialect === 'postgres' || next === '|' || next === '&') {
+        i += next === '|' || next === '&' ? 2 : 1;
+        continue;
+      }
       positional += 1;
       out.push({ ordinal: positional, start: i, end: i + 1, style: 'qmark' });
       i++;
@@ -968,6 +978,12 @@ export function findPlaceholders(sql: string, dialect: SqlDialect): SqlPlacehold
       }
       if (at(sql, i + 1) === '=') {
         i += 2;
+        continue;
+      }
+      // A `:` directly after identifier text is not a placeholder: Postgres
+      // array slices read `arr[lo:hi]`, where `hi` is a bound, not a bind.
+      if (isIdentPart(at(sql, i - 1))) {
+        i++;
         continue;
       }
       let j = i + 1;

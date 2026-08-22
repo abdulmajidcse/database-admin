@@ -65,6 +65,11 @@ export function bindStatement(
 
   // Already positional: the caller supplies the array itself.
   if (named.length === 0) {
+    // Nothing was supplied, so nothing is being parameterized here. Pass the
+    // statement through exactly as written rather than refusing it — binding is
+    // opt-in, and a `?` the user did not mean as a placeholder is the driver's
+    // business, which is how it behaved before binding existed.
+    if (positional.length === 0) return { sql, params: [] };
     const wanted = new Set(rest.map((p) => (p.style === 'dollar' ? p.ordinal : p.ordinal))).size;
     if (positional.length !== wanted) {
       throw new BindError(
