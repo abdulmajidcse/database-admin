@@ -72,8 +72,10 @@ import {
   qualify,
   selectApplicableChanges,
 } from './ddl';
+import type { Cell } from '../../../../lib/wire';
 import { introspectMysql } from './introspect';
 import {
+  cellToParam,
   columnMetaForFields,
   detectFlavor,
   encodeRow,
@@ -145,6 +147,19 @@ function coreOf(conn: PoolConnection | PromiseConnection): CoreConnection {
 /** mysql2's parameter type is deliberately narrow; our params are opaque. */
 function asValues(params: unknown[]): QueryValues {
   return params as unknown as QueryValues;
+}
+
+/**
+ * Decode wire Cells to driver values before binding (§6). Postgres maps through
+ * cellToPgParam and SQLite through toBinding; this path used to cast straight
+ * to mysql2's type, so a tagged cell reached the escaper as an object and came
+ * out as the string "[object Object]" — a WHERE that matches nothing and
+ * reports success, or a SET that expands the tag's own fields into the
+ * statement.
+ */
+function boundParams(params: unknown[] | undefined): unknown[] | undefined {
+  if (!params || params.length === 0) return undefined;
+  return params.map((p) => cellToParam(p as Cell));
 }
 
 // ---------------------------------------------------------------------------
@@ -696,7 +711,11 @@ class MysqlConnector implements SqlConnector {
     let cursorTookOver = false;
 
     try {
-      const { pump, meta } = this.startStream(lease.core, sql, opts.params as unknown[] | undefined);
+      // Wire Cells must be decoded before they reach mysql2, exactly as the
+      // Postgres and SQLite paths do. Without this a tagged cell — a bigint, a
+      // decimal, bytes — is stringified to "[object Object]" and the statement
+      // runs, matches nothing and reports success.
+      const { pump, meta } = this.startStream(lease.core, sql, boundParams(opts.params));
       // One row past the page tells us truthfully whether more remain.
       const first = await pump.take(maxRows + 1);
 
@@ -838,11 +857,7 @@ class MysqlConnector implements SqlConnector {
     const batchSize = Math.max(1, opts.maxRows ?? CONFIG.defaultPageSize);
     let pump: StreamPump | null = null;
     try {
-      const { pump: rowPump, meta } = this.startStream(
-        lease.core,
-        sql,
-        opts.params as unknown[] | undefined,
-      );
+      const { pump: rowPump, meta } = this.startStream(lease.core, sql, boundParams(opts.params));
       pump = rowPump;
       let emitted = 0;
       for (;;) {

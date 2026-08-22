@@ -355,6 +355,45 @@ export const historyRepo = {
   },
 };
 
+/**
+ * Live templates (docs/roadmap.md M10). Owner-scoped like everything else here:
+ * a snippet is a private convenience, not shared state.
+ */
+export const snippetsRepo = {
+  list() {
+    return getDb()
+      .prepare('SELECT * FROM snippets WHERE owner_id = ? ORDER BY prefix')
+      .all(requireUserId()) as Record<string, unknown>[];
+  },
+  upsert(s: { id?: string; prefix: string; label?: string; body: string; engines?: string[] }) {
+    const now = Date.now();
+    const id = s.id ?? randomUUID();
+    // The prefix is unique per owner, and ON CONFLICT(id) does not cover that
+    // index — so a duplicate would surface as a raw SQLITE_CONSTRAINT 500.
+    // Checked first so the caller gets a sentence it can show a user.
+    const clash = getDb()
+      .prepare('SELECT id FROM snippets WHERE owner_id = ? AND prefix = ? AND id <> ?')
+      .get(requireUserId(), s.prefix, id) as { id: string } | undefined;
+    if (clash) {
+      throw new Error(`A snippet with the prefix "${s.prefix}" already exists.`);
+    }
+    getDb()
+      .prepare(
+        `INSERT INTO snippets (id, owner_id, prefix, label, body, engines, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           prefix = excluded.prefix, label = excluded.label, body = excluded.body,
+           engines = excluded.engines, updated_at = excluded.updated_at
+         WHERE snippets.owner_id = excluded.owner_id`,
+      )
+      .run(id, requireUserId(), s.prefix, s.label ?? '', s.body, (s.engines ?? []).join(','), now, now);
+    return id;
+  },
+  remove(id: string) {
+    getDb().prepare('DELETE FROM snippets WHERE id = ? AND owner_id = ?').run(id, requireUserId());
+  },
+};
+
 export const savedQueriesRepo = {
   list() {
     return getDb()

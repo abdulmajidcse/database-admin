@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyStatement,
   dialectForEngine,
+  findPlaceholders,
   isDestructive,
   splitStatements,
   statementAtOffset,
@@ -677,5 +678,106 @@ describe('buildWhere', () => {
     );
     expect(c.conditions).toEqual(['"a" = $1', '"b" IS NULL']);
     expect(c.params).toEqual(['1']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bind parameters (docs/roadmap.md M10)
+// ---------------------------------------------------------------------------
+
+describe('findPlaceholders', () => {
+  const names = (sql: string, d: SqlDialect = 'postgres') =>
+    findPlaceholders(sql, d).map((p) => p.name ?? `#${p.ordinal}`);
+
+  it('finds named placeholders', () => {
+    expect(names('SELECT * FROM t WHERE a = :id AND b = :name')).toEqual(['id', 'name']);
+  });
+
+  it('reports the same name once per occurrence, in order', () => {
+    const found = findPlaceholders('SELECT :a, :b, :a', 'postgres');
+    expect(found.map((p) => p.name)).toEqual(['a', 'b', 'a']);
+    expect(found.map((p) => p.start)).toEqual([7, 11, 15]);
+  });
+
+  it('ignores a placeholder inside a string literal', () => {
+    expect(names("SELECT ':id' , :real")).toEqual(['real']);
+  });
+
+  it('ignores a placeholder inside a line or block comment', () => {
+    expect(names('SELECT 1 -- :nope\nWHERE a = :yes')).toEqual(['yes']);
+    expect(names('SELECT /* :nope */ :yes')).toEqual(['yes']);
+  });
+
+  it('ignores a placeholder inside a quoted identifier', () => {
+    expect(names('SELECT ":id" FROM t WHERE a = :real')).toEqual(['real']);
+  });
+
+  it('ignores a placeholder inside a dollar-quoted body', () => {
+    expect(names('DO $$ BEGIN PERFORM :nope; END $$; SELECT :yes')).toEqual(['yes']);
+  });
+
+  it('does not mistake a Postgres cast for a placeholder', () => {
+    expect(names("SELECT '1'::int, a::text FROM t WHERE b = :real")).toEqual(['real']);
+  });
+
+  it('does not mistake MySQL := assignment for a placeholder', () => {
+    expect(names('SET @x := 1', 'mysql')).toEqual([]);
+  });
+
+  it('finds positional ? placeholders', () => {
+    const found = findPlaceholders('SELECT * FROM t WHERE a = ? AND b = ?', 'mysql');
+    expect(found.map((p) => p.ordinal)).toEqual([1, 2]);
+    expect(found.every((p) => p.name === undefined)).toBe(true);
+  });
+
+  it('finds Postgres numbered placeholders and keeps their number', () => {
+    const found = findPlaceholders('SELECT * FROM t WHERE a = $2 AND b = $1', 'postgres');
+    expect(found.map((p) => p.ordinal)).toEqual([2, 1]);
+  });
+
+  it('does not read a dollar-quote tag as a numbered placeholder', () => {
+    expect(findPlaceholders('SELECT $tag$ body $tag$', 'postgres')).toEqual([]);
+  });
+
+  it('ignores ? inside a MySQL backtick identifier', () => {
+    expect(findPlaceholders('SELECT `we?ird` FROM t', 'mysql')).toEqual([]);
+  });
+
+  it('returns nothing for SQL with no placeholders', () => {
+    expect(findPlaceholders('SELECT 1', 'postgres')).toEqual([]);
+  });
+
+  it('reports offsets that slice back to the placeholder text', () => {
+    const sql = 'SELECT * FROM t WHERE a = :id';
+    const [p] = findPlaceholders(sql, 'postgres');
+    expect(sql.slice(p.start, p.end)).toBe(':id');
+  });
+});
+
+describe('findPlaceholders — operators that are not placeholders', () => {
+  it('does not read the Postgres jsonb ? operator as a placeholder', () => {
+    // `?` is key-exists in Postgres, which binds with $n and never with ?.
+    expect(findPlaceholders("SELECT data ? 'key' FROM t", 'postgres')).toEqual([]);
+  });
+
+  it('does not read ?| or ?& as placeholders in any dialect', () => {
+    expect(findPlaceholders("SELECT a ?| array['x'] FROM t", 'postgres')).toEqual([]);
+    expect(findPlaceholders("SELECT a ?& array['x'] FROM t", 'postgres')).toEqual([]);
+    expect(findPlaceholders('SELECT a ?| b', 'mysql')).toEqual([]);
+  });
+
+  it('still finds ? where it really is a placeholder', () => {
+    expect(findPlaceholders('SELECT * FROM t WHERE a = ?', 'mysql')).toHaveLength(1);
+    expect(findPlaceholders('SELECT * FROM t WHERE a = ?', 'sqlite')).toHaveLength(1);
+  });
+
+  it('does not read an array slice bound as a named placeholder', () => {
+    // arr[lo:hi] — `hi` follows an identifier character, so it is a slice bound.
+    expect(findPlaceholders('SELECT arr[lo:hi] FROM t', 'postgres')).toEqual([]);
+  });
+
+  it('still finds a named placeholder after an operator or space', () => {
+    expect(findPlaceholders('SELECT * FROM t WHERE a = :hi', 'postgres')).toHaveLength(1);
+    expect(findPlaceholders('SELECT * FROM t WHERE a=:hi', 'postgres')).toHaveLength(1);
   });
 });

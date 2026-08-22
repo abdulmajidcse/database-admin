@@ -44,6 +44,7 @@
     "react-dom": "^19.2.8",
     "react-resizable-panels": "^4.12.2",
     "sonner": "^2.0.8",
+    "sql-formatter": "^15.8.2",
     "ssh2": "^1.17.0",
     "tailwind-merge": "^3.6.0",
     "tsx": "^4.20.6",

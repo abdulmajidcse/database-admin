@@ -30,6 +30,7 @@ import {
   History as HistoryIcon,
   Lock,
   Play,
+  Scissors,
   Star,
   Wand2,
 } from 'lucide-react';
@@ -62,6 +63,7 @@ import { openExportDialog } from '@/components/transfer/transfer-host';
 import type { EditorHandle } from './sql-editor';
 import { HistoryDialog } from './history-panel';
 import { SavedQueriesDialog } from './saved-queries';
+import { SnippetsPanel } from './snippets-panel';
 
 export interface EditorToolbarProps {
   tab: WorkspaceTab;
@@ -95,6 +97,7 @@ export function EditorToolbar(props: EditorToolbarProps) {
   const [explain, setExplain] = React.useState<{ open: boolean; analyze: boolean }>({ open: false, analyze: false });
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [savedOpen, setSavedOpen] = React.useState(false);
+  const [snippetsOpen, setSnippetsOpen] = React.useState(false);
   const mod = useModifierLabel();
 
   const sqlConnections = (connections.data?.connections ?? []).filter((c) => workspaceModeFor(c.engine) === 'sql');
@@ -347,6 +350,15 @@ export function EditorToolbar(props: EditorToolbarProps) {
         >
           Saved
         </Button>
+        <Button
+          size="xs"
+          variant="ghost"
+          icon={<Scissors className="size-3" />}
+          onClick={() => setSnippetsOpen(true)}
+          title="Snippets — type a prefix in the editor to insert one"
+        >
+          Snippets
+        </Button>
 
         <span className="ml-auto flex shrink-0 items-center gap-2 text-[10px] text-[var(--fg-subtle)]">
           {readOnly && (
@@ -380,6 +392,8 @@ export function EditorToolbar(props: EditorToolbarProps) {
         connectionId={tab.connectionId}
         onRestore={(text) => props.onLoadSql(text)}
       />
+
+      <SnippetsPanel open={snippetsOpen} onClose={() => setSnippetsOpen(false)} />
 
       <SavedQueriesDialog
         open={savedOpen}

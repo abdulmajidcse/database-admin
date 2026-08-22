@@ -35,6 +35,7 @@ import { Badge, Button, EmptyState, Spinner, Tabs, cn } from '../ui/primitives';
 import { ConnectionSidebar, openConnectionEditor, useConnections } from './connection-sidebar';
 import { CommandPalette, openCommandPalette } from './command-palette';
 import { StatusBar } from './status-bar';
+import { ShortcutsSheet } from './shortcuts-sheet';
 
 // ---------------------------------------------------------------------------
 // Slot registry — how feature modules attach to the shell
@@ -95,8 +96,17 @@ function useRegistry(): number {
 // Workspace
 // ---------------------------------------------------------------------------
 
+/** True for an element that owns the keystroke — a field, or a CodeMirror pane. */
+function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el || !el.tagName) return false;
+  const tag = el.tagName.toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable === true;
+}
+
 export function Workspace() {
   useRegistry();
+  const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   const connections = useConnections();
   const hydrated = useWorkspaceStore((s) => s.hydrated);
   const layout = useWorkspaceStore((s) => s.layout);
@@ -146,6 +156,13 @@ export function Workspace() {
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
+      // `?` opens the cheat sheet, but only when nothing is being typed into —
+      // otherwise it would swallow a question mark in a WHERE clause.
+      if (!mod && e.key === '?' && !isTypingTarget(e.target)) {
+        e.preventDefault();
+        setShortcutsOpen(true);
+        return;
+      }
       if (!mod) return;
       const key = e.key.toLowerCase();
       if (key === 'b') {
@@ -292,6 +309,7 @@ export function Workspace() {
 
       <StatusBar />
       <CommandPalette />
+      <ShortcutsSheet open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       {Overlays && <Overlays connectionId={activeConnectionId} tab={activeTab} />}
     </div>
   );

@@ -851,3 +851,162 @@ function nameAfterWord(tokens: SqlToken[], upper: string): string | null {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Bind parameters (docs/roadmap.md M10)
+// ---------------------------------------------------------------------------
+
+/** One placeholder found in a statement, located so the caller can rewrite it. */
+export interface SqlPlaceholder {
+  /** `:name` style. Undefined for `?` and `$n`, which carry no name. */
+  name?: string;
+  /** 1-based position. For `$n` this is n as written, not the position found. */
+  ordinal: number;
+  start: number;
+  end: number;
+  style: 'named' | 'qmark' | 'dollar';
+}
+
+/**
+ * Locate bind placeholders, skipping every region where one would be data
+ * rather than a parameter — string literals, all four identifier quotings,
+ * line and block comments, and Postgres dollar-quoted bodies.
+ *
+ * This reuses the scanners `splitStatements` uses rather than re-deriving them.
+ * That matters: if this function and the splitter disagreed about where a
+ * string ends, the UI would offer to bind something inside a literal and the
+ * rewrite would corrupt the statement.
+ *
+ * Two near-misses are deliberately excluded. Postgres `::` is a cast, not a
+ * placeholder called `:int`. MySQL `:=` is assignment. Both appear in ordinary
+ * SQL and both would otherwise be reported.
+ */
+export function findPlaceholders(sql: string, dialect: SqlDialect): SqlPlaceholder[] {
+  const rules = RULES[dialect];
+  const out: SqlPlaceholder[] = [];
+  let i = 0;
+  let positional = 0;
+
+  while (i < sql.length) {
+    const c = sql.charAt(i);
+
+    if (c === '-' && at(sql, i + 1) === '-') {
+      const after = at(sql, i + 2);
+      if (!rules.dashDashNeedsSpace || after === '' || isSpace(after)) {
+        i = scanLineComment(sql, i);
+        continue;
+      }
+    }
+    if (rules.hashComments && c === '#') {
+      i = scanLineComment(sql, i);
+      continue;
+    }
+    if (c === '/' && at(sql, i + 1) === '*') {
+      i = scanBlockComment(sql, i, rules.nestedBlockComments);
+      continue;
+    }
+    if (
+      rules.escapeStringPrefix &&
+      (c === 'E' || c === 'e') &&
+      at(sql, i + 1) === "'" &&
+      !isIdentPart(at(sql, i - 1))
+    ) {
+      i = scanQuoted(sql, i + 1, "'", true, true);
+      continue;
+    }
+    if (c === "'") {
+      i = scanQuoted(sql, i, "'", true, rules.backslashEscapes);
+      continue;
+    }
+    if (c === '"') {
+      i = scanQuoted(sql, i, '"', true, rules.doubleQuoteIsString && rules.backslashEscapes);
+      continue;
+    }
+    if (rules.backtickIdent && c === '`') {
+      i = scanQuoted(sql, i, '`', true, false);
+      continue;
+    }
+    if (rules.bracketIdent && c === '[') {
+      i = scanBracket(sql, i);
+      continue;
+    }
+    if (rules.dollarQuoting && c === '$') {
+      const tag = dollarTagAt(sql, i);
+      if (tag !== null) {
+        i = scanDollarQuoted(sql, i, tag);
+        continue;
+      }
+      // Not a tag, so `$` followed by digits is a numbered placeholder.
+      let j = i + 1;
+      while (isDigit(at(sql, j))) j++;
+      if (j > i + 1) {
+        out.push({
+          ordinal: Number(sql.slice(i + 1, j)),
+          start: i,
+          end: j,
+          style: 'dollar',
+        });
+        i = j;
+        continue;
+      }
+      i++;
+      continue;
+    }
+
+    if (c === '?') {
+      // `?` is only a placeholder where the engine actually binds with one.
+      // Postgres numbers its parameters ($n) and uses `?`, `?|` and `?&` as
+      // jsonb operators, so reading one as a placeholder breaks a working
+      // query. `?|` and `?&` are operators everywhere, so they are skipped in
+      // every dialect.
+      const next = at(sql, i + 1);
+      if (dialect === 'postgres' || next === '|' || next === '&') {
+        i += next === '|' || next === '&' ? 2 : 1;
+        continue;
+      }
+      positional += 1;
+      out.push({ ordinal: positional, start: i, end: i + 1, style: 'qmark' });
+      i++;
+      continue;
+    }
+
+    if (c === ':') {
+      // `::` is a Postgres cast and `:=` is a MySQL assignment; neither binds.
+      if (at(sql, i + 1) === ':') {
+        i += 2;
+        continue;
+      }
+      if (at(sql, i + 1) === '=') {
+        i += 2;
+        continue;
+      }
+      // A `:` directly after identifier text is not a placeholder: Postgres
+      // array slices read `arr[lo:hi]`, where `hi` is a bound, not a bind.
+      if (isIdentPart(at(sql, i - 1))) {
+        i++;
+        continue;
+      }
+      let j = i + 1;
+      if (isIdentStart(at(sql, j))) {
+        j++;
+        while (isIdentPart(at(sql, j))) j++;
+        positional += 1;
+        out.push({
+          name: sql.slice(i + 1, j),
+          ordinal: positional,
+          start: i,
+          end: j,
+          style: 'named',
+        });
+        i = j;
+        continue;
+      }
+      i++;
+      continue;
+    }
+
+    i++;
+  }
+
+  return out;
+}

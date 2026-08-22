@@ -34,6 +34,7 @@ import { AlertTriangle, PlugZap } from 'lucide-react';
 import { api } from '@/lib/api-client';
 import type { SchemaResponse } from '@/lib/api-types';
 import type { EngineKind, SchemaModel } from '@/lib/schema-model';
+import type { Cell } from '@/lib/wire';
 import { Button, ConfirmDialog, EmptyState } from '@/components/ui/primitives';
 import { registerTabView, registerWorkspaceSlot, type SlotProps, type TabViewProps } from '@/components/shell/workspace';
 import { useConnections } from '@/components/shell/connection-sidebar';
@@ -53,236 +54,11 @@ import {
   type RunSpec,
 } from '@/hooks/use-query-runner';
 import { statementAtOffset, type SqlDialect } from '@/server/db/sql/lexer';
-import { lexerDialect, sqlLanguageExtension } from './completion';
+import { FormatRefusedError, formatSql, hasDelimiterCommand } from '@/server/db/sql/format';
+import { lexerDialect, sqlLanguageExtension, type EditorSnippet } from './completion';
 import { EditorToolbar } from './editor-toolbar';
+import { ParamsBar } from './params-bar';
 import { ResultTabs } from './result-tabs';
-
-// ---------------------------------------------------------------------------
-// Formatting
-// ---------------------------------------------------------------------------
-
-const FORMAT_KEYWORDS = new Set([
-  'ADD', 'ALL', 'ALTER', 'AND', 'ANY', 'AS', 'ASC', 'BEGIN', 'BETWEEN', 'BY', 'CASCADE', 'CASE',
-  'CAST', 'CHECK', 'COLUMN', 'COMMIT', 'CONFLICT', 'CONSTRAINT', 'CREATE', 'CROSS', 'CURRENT',
-  'DATABASE', 'DEFAULT', 'DELETE', 'DESC', 'DISTINCT', 'DO', 'DROP', 'ELSE', 'END', 'EXCEPT',
-  'EXISTS', 'FALSE', 'FETCH', 'FILTER', 'FIRST', 'FOR', 'FOREIGN', 'FROM', 'FULL', 'GRANT',
-  'GROUP', 'HAVING', 'IF', 'ILIKE', 'IN', 'INDEX', 'INNER', 'INSERT', 'INTERSECT', 'INTO', 'IS',
-  'JOIN', 'KEY', 'LAST', 'LATERAL', 'LEFT', 'LIKE', 'LIMIT', 'MATERIALIZED', 'NATURAL', 'NOT',
-  'NULL', 'NULLS', 'OFFSET', 'ON', 'OR', 'ORDER', 'OUTER', 'OVER', 'PARTITION', 'PRIMARY',
-  'PROCEDURE', 'REFERENCES', 'RENAME', 'REPLACE', 'RETURNING', 'RIGHT', 'ROLLBACK', 'ROW', 'ROWS',
-  'SELECT', 'SET', 'TABLE', 'TEMPORARY', 'THEN', 'TO', 'TRUE', 'TRUNCATE', 'UNION', 'UNIQUE',
-  'UPDATE', 'USING', 'VALUES', 'VIEW', 'WHEN', 'WHERE', 'WINDOW', 'WITH',
-]);
-
-/** Keywords that start a clause and therefore start a line. */
-const CLAUSE_BREAK = new Set([
-  'SELECT', 'FROM', 'WHERE', 'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'OFFSET', 'UNION', 'INTERSECT',
-  'EXCEPT', 'VALUES', 'SET', 'RETURNING', 'INSERT', 'UPDATE', 'DELETE', 'WITH', 'WINDOW', 'FETCH',
-  'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'CROSS', 'NATURAL', 'ON',
-]);
-
-/** Clause keywords that read better indented under the one above them. */
-const CLAUSE_INDENT = new Set(['ON']);
-
-const JOIN_PREFIX = new Set(['LEFT', 'RIGHT', 'FULL', 'INNER', 'CROSS', 'NATURAL', 'OUTER']);
-
-interface FmtToken {
-  kind: 'word' | 'string' | 'comment' | 'punct' | 'number';
-  text: string;
-  upper: string;
-}
-
-/**
- * A scanner, not a parser: it exists only to know which characters are inside a
- * string, an identifier quote or a comment, so formatting can never rewrite
- * them. Dialect flags mirror the server lexer's rules.
- */
-function tokenizeForFormat(sql: string, dialect: SqlDialect): FmtToken[] {
-  const backslash = dialect === 'mysql';
-  const backticks = dialect !== 'postgres';
-  const brackets = dialect === 'sqlite';
-  const dollars = dialect === 'postgres';
-  const hashComments = dialect === 'mysql';
-
-  const out: FmtToken[] = [];
-  const push = (kind: FmtToken['kind'], text: string): void => {
-    out.push({ kind, text, upper: kind === 'word' ? text.toUpperCase() : '' });
-  };
-
-  const at = (i: number): string => (i >= 0 && i < sql.length ? sql.charAt(i) : '');
-  let i = 0;
-
-  const scanQuoted = (start: number, quote: string, escapes: boolean): number => {
-    let j = start + 1;
-    while (j < sql.length) {
-      const c = sql.charAt(j);
-      if (escapes && c === '\\') {
-        j += 2;
-        continue;
-      }
-      if (c === quote) {
-        if (at(j + 1) === quote) {
-          j += 2;
-          continue;
-        }
-        return j + 1;
-      }
-      j++;
-    }
-    return sql.length;
-  };
-
-  while (i < sql.length) {
-    const c = sql.charAt(i);
-    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v') {
-      i++;
-      continue;
-    }
-    if (c === '-' && at(i + 1) === '-') {
-      const end = sql.indexOf('\n', i);
-      push('comment', sql.slice(i, end === -1 ? sql.length : end));
-      i = end === -1 ? sql.length : end;
-      continue;
-    }
-    if (hashComments && c === '#') {
-      const end = sql.indexOf('\n', i);
-      push('comment', sql.slice(i, end === -1 ? sql.length : end));
-      i = end === -1 ? sql.length : end;
-      continue;
-    }
-    if (c === '/' && at(i + 1) === '*') {
-      const end = sql.indexOf('*/', i + 2);
-      const stop = end === -1 ? sql.length : end + 2;
-      push('comment', sql.slice(i, stop));
-      i = stop;
-      continue;
-    }
-    if (dollars && c === '$') {
-      const match = /^\$[A-Za-z_][\w]*\$|^\$\$/.exec(sql.slice(i));
-      if (match) {
-        const tagText = match[0];
-        const end = sql.indexOf(tagText, i + tagText.length);
-        const stop = end === -1 ? sql.length : end + tagText.length;
-        push('string', sql.slice(i, stop));
-        i = stop;
-        continue;
-      }
-    }
-    if (c === "'" || c === '"' || (backticks && c === '`')) {
-      const end = scanQuoted(i, c, backslash && c !== '`');
-      push('string', sql.slice(i, end));
-      i = end;
-      continue;
-    }
-    if (brackets && c === '[') {
-      const end = sql.indexOf(']', i + 1);
-      const stop = end === -1 ? sql.length : end + 1;
-      push('string', sql.slice(i, stop));
-      i = stop;
-      continue;
-    }
-    // Any code point above ASCII is a legal unquoted identifier character in
-    // every engine, so the ranges are spelled out rather than left to \w.
-    if (/[A-Za-z_-￿]/.test(c)) {
-      let j = i + 1;
-      while (j < sql.length && /[A-Za-z0-9_$-￿]/.test(sql.charAt(j))) j++;
-      push('word', sql.slice(i, j));
-      i = j;
-      continue;
-    }
-    if (/[0-9]/.test(c)) {
-      let j = i + 1;
-      while (j < sql.length && /[0-9A-Za-z_.]/.test(sql.charAt(j))) j++;
-      push('number', sql.slice(i, j));
-      i = j;
-      continue;
-    }
-    push('punct', c);
-    i++;
-  }
-  return out;
-}
-
-/**
- * Pretty-print the buffer. Deliberately conservative — it never touches the
- * inside of a string, an identifier quote or a comment, and a MySQL script that
- * redefines the delimiter is left exactly as written rather than risk mangling
- * a stored procedure body.
- */
-export function formatSql(sql: string, dialect: SqlDialect): string {
-  if (sql.trim() === '') return sql;
-  if (dialect === 'mysql' && /^[ \t]*delimiter[ \t]+\S/im.test(sql)) return sql;
-
-  const tokens = tokenizeForFormat(sql, dialect);
-  const parts: string[] = [];
-  let depth = 0;
-  let atLineStart = true;
-  let prev: FmtToken | null = null;
-
-  const indent = (level: number): string => '  '.repeat(Math.max(0, level));
-  const br = (level: number): void => {
-    parts.push(`\n${indent(level)}`);
-    atLineStart = true;
-  };
-
-  const suppressBreak = (token: FmtToken): boolean => {
-    if (!prev) return true;
-    if (prev.kind === 'punct' && prev.text === '(') return true;
-    if (prev.kind !== 'word') return false;
-    if (prev.upper === 'DELETE' && token.upper === 'FROM') return true;
-    if (prev.upper === 'INSERT' && token.upper === 'INTO') return true;
-    if (JOIN_PREFIX.has(prev.upper) && (token.upper === 'JOIN' || JOIN_PREFIX.has(token.upper))) return true;
-    if (prev.upper === 'DISTINCT' && token.upper === 'ON') return true;
-    if (prev.upper === 'UNION' && (token.upper === 'ALL' || token.upper === 'DISTINCT')) return true;
-    return false;
-  };
-
-  const needsSpace = (token: FmtToken): boolean => {
-    if (atLineStart || !prev) return false;
-    if (token.kind === 'punct' && (token.text === ',' || token.text === ')' || token.text === ';' || token.text === '.')) {
-      return false;
-    }
-    if (prev.kind === 'punct' && (prev.text === '(' || prev.text === '.')) return false;
-    // `count(` stays tight; `IN (` keeps its space.
-    if (token.kind === 'punct' && token.text === '(' && prev.kind === 'word' && !FORMAT_KEYWORDS.has(prev.upper)) {
-      return false;
-    }
-    return true;
-  };
-
-  for (const token of tokens) {
-    if (token.kind === 'punct' && token.text === ')') depth = Math.max(0, depth - 1);
-
-    if (token.kind === 'word' && CLAUSE_BREAK.has(token.upper) && !suppressBreak(token)) {
-      br(depth + (CLAUSE_INDENT.has(token.upper) ? 1 : 0));
-    }
-
-    if (needsSpace(token)) parts.push(' ');
-    parts.push(
-      token.kind === 'word' && FORMAT_KEYWORDS.has(token.upper) && prev?.text !== '.' ? token.upper : token.text,
-    );
-    atLineStart = false;
-
-    if (token.kind === 'punct' && token.text === '(') depth++;
-    if (token.kind === 'punct' && token.text === ',' && depth === 0) br(1);
-    if (token.kind === 'comment' && !token.text.startsWith('/*')) br(depth);
-    if (token.kind === 'punct' && token.text === ';' && depth === 0) {
-      parts.push('\n\n');
-      atLineStart = true;
-      prev = null;
-      continue;
-    }
-    prev = token;
-  }
-
-  return parts
-    .join('')
-    .split('\n')
-    .map((line) => line.replace(/[ \t]+$/, ''))
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
 
 // ---------------------------------------------------------------------------
 // Decorations
@@ -399,6 +175,8 @@ export interface SqlEditorProps {
   model: SchemaModel | null;
   defaultSchema?: string;
   readOnly?: boolean;
+  /** User live templates (docs/roadmap.md M10). */
+  snippets?: EditorSnippet[];
   errorMarks: ErrorMark[];
   onRunStatement: () => void;
   onRunScript: () => void;
@@ -423,17 +201,46 @@ export const SqlEditor = React.forwardRef<EditorHandle, SqlEditorProps>(function
         engine: props.engine,
         model: props.model,
         defaultSchema: props.defaultSchema,
+        snippets: props.snippets,
       }),
-    [props.engine, props.model, props.defaultSchema],
+    [props.engine, props.model, props.defaultSchema, props.snippets],
   );
 
   const doFormat = React.useCallback(() => {
     const view = viewRef.current?.view;
     if (!view) return;
-    const current = view.state.doc.toString();
-    const next = formatSql(current, lexerDialect(handlers.current.engine));
+    const dialect = lexerDialect(handlers.current.engine);
+    // Selection if there is one, whole document otherwise — predictable, and it
+    // lets you format one statement of a long script without touching the rest.
+    // Tested against the WHOLE buffer, not the fragment about to be formatted.
+    // A selection taken from inside a routine body carries no DELIMITER line,
+    // so checking only the selection would reflow exactly the text the bail-out
+    // exists to protect.
+    if (hasDelimiterCommand(view.state.doc.toString(), dialect)) {
+      toast.message('Not formatting: this script redefines the delimiter, and reflowing a routine body would corrupt it.');
+      return;
+    }
+
+    const range = view.state.selection.main;
+    const hasSelection = !range.empty;
+    const from = hasSelection ? range.from : 0;
+    const to = hasSelection ? range.to : view.state.doc.length;
+    const current = view.state.doc.sliceString(from, to);
+
+    let next: string;
+    try {
+      next = formatSql(current, dialect);
+    } catch (err) {
+      // The guard refused: the statement count or a statement's kind changed,
+      // so the buffer is left exactly as it was and the user is told why.
+      if (err instanceof FormatRefusedError) {
+        toast.error(err.message);
+        return;
+      }
+      throw err;
+    }
     if (next === current) return;
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: next } });
+    view.dispatch({ changes: { from, to, insert: next } });
   }, []);
 
   const keys = React.useMemo(
@@ -605,11 +412,23 @@ export function SqlWorkspace({ tab }: TabViewProps) {
   const database = typeof tab.state.database === 'string' ? tab.state.database : undefined;
   const schema = typeof tab.state.schema === 'string' ? tab.state.schema : undefined;
   const txMode = tab.state.txMode === true;
+  // Kept on the tab so a reload does not lose the values you just typed, the
+  // same way the SQL itself and the transaction toggle are kept.
+  const paramValues = (tab.state.params ?? {}) as Record<string, Cell>;
 
   const setSql = React.useCallback(
     (next: string) => useWorkspaceStore.getState().setTabState(tab.id, { sql: next }),
     [tab.id],
   );
+
+  // The user's live templates. Cached hard: they change when someone edits
+  // them, not while you type.
+  const snippetsQuery = useQuery<{ snippets: EditorSnippet[] }>({
+    queryKey: ['snippets'],
+    queryFn: () => api.get<{ snippets: EditorSnippet[] }>('/api/snippets'),
+    staleTime: 300_000,
+    retry: false,
+  });
 
   const schemaQuery = useQuery<SchemaResponse>({
     queryKey: ['schema', tab.connectionId],
@@ -653,11 +472,14 @@ export function SqlWorkspace({ tab }: TabViewProps) {
    * every SELECT trains people to type the phrase without reading it.
    */
   const launch = React.useCallback(
-    (spec: RunSpec): void => {
+    (rawSpec: RunSpec): void => {
       if (!tab.connectionId) {
         toast.error('Pick a connection for this tab first.');
         return;
       }
+      // Every run path funnels through here, so the bind values are attached
+      // once rather than at each of the three call sites.
+      const spec: RunSpec = { ...rawSpec, params: paramValues };
       const verdict = runner.destructive(spec.sql);
       const prodWrite = connection?.envTag === 'prod' && runner.writes(spec.sql);
       if (!verdict.destructive && !prodWrite) {
@@ -837,6 +659,13 @@ export function SqlWorkspace({ tab }: TabViewProps) {
         </div>
       )}
 
+      <ParamsBar
+        sql={sql}
+        dialect={lexerDialect(engine)}
+        values={paramValues}
+        onChange={(next) => useWorkspaceStore.getState().setTabState(tab.id, { params: next })}
+      />
+
       <div className="min-h-0 flex-1 overflow-hidden">
         {tab.connectionId ? (
           <SqlEditor
@@ -846,6 +675,7 @@ export function SqlWorkspace({ tab }: TabViewProps) {
             engine={engine}
             model={schemaQuery.data?.model ?? null}
             defaultSchema={schema}
+            snippets={snippetsQuery.data?.snippets ?? []}
             errorMarks={errorMarks}
             onRunStatement={runStatement}
             onRunScript={runScript}

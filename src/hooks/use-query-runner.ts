@@ -31,6 +31,7 @@ import { api, ApiRequestError } from '@/lib/api-client';
 import type { QueryRequest, QueryResponse, ServerMessage } from '@/lib/api-types';
 import type { EngineKind } from '@/lib/schema-model';
 import type { ExplainPlan, StatementResult } from '@/lib/results';
+import type { Cell } from '@/lib/wire';
 import { wsClient } from '@/lib/ws-client';
 import {
   classifyStatement,
@@ -282,6 +283,8 @@ export interface RunSpec {
   atomic?: boolean;
   /** Echo of `requiresConfirmation.phrase` for the atomic path (§9). */
   confirm?: string;
+  /** Values for `:name` bind placeholders (docs/roadmap.md M10). */
+  params?: Record<string, Cell>;
 }
 
 export type RunOutcome =
@@ -430,7 +433,7 @@ export function useQueryRunner(
           return { kind: 'done' };
         }
 
-        const request: QueryRequest = {
+        const request: QueryRequest & { params?: Record<string, Cell> } = {
           connectionId,
           sql: spec.sql,
           // 'single' is the strict "statement under the cursor" path: the server
@@ -441,6 +444,9 @@ export function useQueryRunner(
           runId,
           database: spec.database,
           schema: spec.schema,
+          // Not on QueryRequest: the contract is frozen, so the route reads bind
+          // values off the raw body the same way it reads continueOnError.
+          params: spec.params,
         };
         const response = await api.post<QueryResponse>('/api/query', request);
         writeState(tabId, {

@@ -49,6 +49,12 @@ import { api } from '../../lib/api-client';
 import type { FetchMoreResponse } from '../../lib/api-types';
 import type { ColumnMeta, ResultSet } from '../../lib/results';
 import { cellToText, type Cell, type Row } from '../../lib/wire';
+import { renderInsertRows, renderUpdateRow } from '../../server/db/sql/dml';
+import { useConnections } from '../shell/connection-sidebar';
+import { useSchema } from '../../hooks/use-schema';
+import { useWorkspaceStore } from '../../state/workspace-store';
+import { findTable } from '../../lib/schema-model';
+import { incomingFor, outgoingFor, type FkDestination } from './fk-navigation';
 import { Badge, Button, EmptyState, Separator, Spinner, Toolbar, cn } from '../ui/primitives';
 import { CellEditor, GridCell, alignsRight } from './cell';
 import { CellViewer } from './cell-viewer';
@@ -149,6 +155,23 @@ function defaultWidth(col: ColumnMeta): number {
 }
 
 /** Excel/DataGrip-compatible TSV: quote anything that would break the shape. */
+/** Clipboard formats the grid can produce (docs/roadmap.md M10). */
+export type CopyFormat = 'tsv' | 'tsv-header' | 'csv' | 'json' | 'markdown' | 'insert' | 'update';
+
+const COPY_ITEMS: { format: CopyFormat; label: string }[] = [
+  { format: 'tsv-header', label: 'Copy with header' },
+  { format: 'csv', label: 'Copy as CSV' },
+  { format: 'json', label: 'Copy as JSON' },
+  { format: 'markdown', label: 'Copy as Markdown' },
+  { format: 'insert', label: 'Copy as INSERT' },
+  { format: 'update', label: 'Copy as UPDATE' },
+];
+
+/** RFC 4180: quote when the value carries a delimiter, quote or newline. */
+function csvEscape(value: string): string {
+  return /[",\n\r]/.test(value) ? `"${value.split('"').join('""')}"` : value;
+}
+
 function tsvEscape(value: string): string {
   return /[\t\n\r"]/.test(value) ? `"${value.split('"').join('""')}"` : value;
 }
@@ -203,6 +226,15 @@ export function DataGrid({
   onApplied,
 }: DataGridProps) {
   const columns = result.columns;
+  // Resolved from the connection rather than passed in: two of the three call
+  // sites have no engine to hand, and one of them is Mongo, which has no SQL
+  // dialect at all. Undefined disables the SQL copy formats rather than
+  // guessing a quoting style.
+  const connections = useConnections();
+  const engine = connections.data?.connections.find((c) => c.id === connectionId)?.engine;
+  // Foreign keys come from the introspected model, which is cached — this adds
+  // no round trip to opening a grid.
+  const schema = useSchema(connectionId, { enabled: true });
 
   const [edit, dispatch] = useEditState();
   const [extraRows, setExtraRows] = React.useState<Row[]>([]);
@@ -216,6 +248,8 @@ export function DataGrid({
   /** Set when typing a printable key opened the editor: that character IS the edit. */
   const [editSeed, setEditSeed] = React.useState<string | null>(null);
   const [viewerAt, setViewerAt] = React.useState<Point | null>(null);
+  const [copyMenuOpen, setCopyMenuOpen] = React.useState(false);
+  const [ctx, setCtx] = React.useState<{ x: number; y: number; point: Point } | null>(null);
   const [detailRow, setDetailRow] = React.useState<number | null>(null);
   const [changesetOpen, setChangesetOpen] = React.useState(false);
   const [widths, setWidths] = React.useState<Record<string, number>>(() => initialWidths(columns));
@@ -444,33 +478,142 @@ export function DataGrid({
 
   // --- clipboard ------------------------------------------------------------
 
-  const copySelection = React.useCallback(
-    (withHeader: boolean) => {
+  /**
+   * Copy the selection (docs/roadmap.md M10). Every format reads the same
+   * lossless cell text (§6): a BIGINT copies as its digits, not as the float
+   * they would round to.
+   *
+   * INSERT and UPDATE need to know which table the rows came from, so they are
+   * offered only when the result declares an `editTarget` — the same signal
+   * that decides whether the grid is editable at all.
+   */
+  const copyAs = React.useCallback(
+    (format: CopyFormat) => {
       if (!sel) return;
       const rg = rangeOf(sel);
-      const lines: string[] = [];
-      if (withHeader) {
-        const head: string[] = [];
-        for (let c = rg.c0; c <= rg.c1; c++) head.push(tsvEscape(columns[order[c]]?.name ?? ''));
-        lines.push(head.join('\t'));
-      }
-      for (let r = rg.r0; r <= rg.r1; r++) {
-        const cells: string[] = [];
-        for (let c = rg.c0; c <= rg.c1; c++) {
-          // cellToText keeps the LOSSLESS text (§6): a BIGINT copies as its
-          // digits, not as the float they would round to.
-          const text = cellToText(valueAt(r, order[c]), 'base64');
-          cells.push(text === null ? '' : tsvEscape(text));
+      const names: string[] = [];
+      for (let c = rg.c0; c <= rg.c1; c++) names.push(columns[order[c]]?.name ?? '');
+
+      const cellsOf = (r: number): Cell[] => {
+        const out: Cell[] = [];
+        for (let c = rg.c0; c <= rg.c1; c++) out.push(valueAt(r, order[c]));
+        return out;
+      };
+      const textOf = (cell: Cell): string => {
+        const t = cellToText(cell, 'base64');
+        return t === null ? '' : t;
+      };
+
+      let payload: string;
+      try {
+        if (format === 'insert' || format === 'update') {
+          const target = result.editTarget;
+          if (!target) throw new Error('These rows are not from a single table.');
+          if (!engine) throw new Error('This connection has no SQL dialect.');
+          const rowsOut: Row[] = [];
+          for (let r = rg.r0; r <= rg.r1; r++) rowsOut.push(cellsOf(r));
+          payload =
+            format === 'insert'
+              ? renderInsertRows({ schema: target.schema, table: target.table }, names, rowsOut, engine)
+              : rowsOut
+                  .map((row) =>
+                    renderUpdateRow(
+                      { schema: target.schema, table: target.table },
+                      names,
+                      row,
+                      // Only key columns actually inside the selection can key
+                      // the statement; anything else is not in `row`.
+                      target.keyColumns.filter((k) => names.includes(k)),
+                      engine,
+                    ),
+                  )
+                  .join('\n');
+        } else if (format === 'json') {
+          const objects: Record<string, string | null>[] = [];
+          for (let r = rg.r0; r <= rg.r1; r++) {
+            const cells = cellsOf(r);
+            const o: Record<string, string | null> = {};
+            names.forEach((n, i) => {
+              o[n] = cells[i] === null ? null : textOf(cells[i]);
+            });
+            objects.push(o);
+          }
+          payload = JSON.stringify(objects, null, 2);
+        } else if (format === 'markdown') {
+          const lines = [`| ${names.join(' | ')} |`, `| ${names.map(() => '---').join(' | ')} |`];
+          for (let r = rg.r0; r <= rg.r1; r++) {
+            // A pipe inside a value would end the cell early.
+            lines.push(`| ${cellsOf(r).map((c) => textOf(c).replace(/\|/g, '\\|')).join(' | ')} |`);
+          }
+          payload = lines.join('\n');
+        } else {
+          const sep = format === 'csv' ? ',' : '\t';
+          const esc = format === 'csv' ? csvEscape : tsvEscape;
+          const lines: string[] = [];
+          if (format === 'csv' || format === 'tsv-header') lines.push(names.map(esc).join(sep));
+          for (let r = rg.r0; r <= rg.r1; r++) {
+            lines.push(cellsOf(r).map((c) => esc(textOf(c))).join(sep));
+          }
+          payload = lines.join('\n');
         }
-        lines.push(cells.join('\t'));
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Could not build that format.');
+        return;
       }
-      const payload = lines.join('\n');
+
       void navigator.clipboard
         .writeText(payload)
         .then(() => toast.success(`Copied ${rg.r1 - rg.r0 + 1} × ${rg.c1 - rg.c0 + 1} cells`))
         .catch(() => toast.error('The browser refused clipboard access.'));
     },
-    [sel, columns, order, valueAt],
+    [sel, columns, order, valueAt, result.editTarget, engine],
+  );
+
+  /**
+   * Where the right-clicked cell can take you (docs/roadmap.md M10). Both
+   * directions are computed from the cached model, so the menu knows before it
+   * opens whether there is anywhere to go.
+   */
+  const destinations = React.useMemo<{ out: FkDestination[]; in: FkDestination[] }>(() => {
+    const none = { out: [], in: [] };
+    const target = result.editTarget;
+    const model = schema.model;
+    if (!ctx || !target || !model) return none;
+    const table = findTable(model, target.schema, target.table);
+    if (!table) return none;
+    const names = columns.map((c) => c.name);
+    const rowCells = names.map((_n, i) => valueAt(ctx.point.r, i));
+    const column = columns[order[ctx.point.c]]?.name;
+    return {
+      out: column ? outgoingFor(table, column, rowCells, names) : [],
+      in: incomingFor(model, table, rowCells, names),
+    };
+  }, [ctx, result.editTarget, schema.model, columns, order, valueAt]);
+
+  const goTo = React.useCallback(
+    (dest: FkDestination) => {
+      setCtx(null);
+      useWorkspaceStore.getState().openTab({
+        kind: 'table',
+        title: dest.table,
+        connectionId,
+        state: {
+          schema: dest.schema,
+          table: dest.table,
+          // The filter layer parameterizes these; no value reaches SQL text.
+          filter: { filters: dest.filters, where: '' },
+          offset: 0,
+          sort: [],
+        },
+      });
+    },
+    [connectionId],
+  );
+
+  /** Kept so the existing ⌘C / ⌘⇧C bindings read unchanged. */
+  const copySelection = React.useCallback(
+    (withHeader: boolean) => copyAs(withHeader ? 'tsv-header' : 'tsv'),
+    [copyAs],
   );
 
   // --- paging ---------------------------------------------------------------
@@ -545,6 +688,16 @@ export function DataGrid({
       return;
     }
     select(hit.point, e.shiftKey);
+  };
+
+  const onGridContextMenu = (e: React.MouseEvent) => {
+    const hit = pointFromEvent(e);
+    if (!hit || hit.gutter) return;
+    e.preventDefault();
+    // Right-clicking moves the selection first, so the menu always describes
+    // the cell it is pointing at rather than a stale one.
+    select(hit.point, false);
+    setCtx({ x: e.clientX, y: e.clientY, point: hit.point });
   };
 
   const onGridDoubleClick = (e: React.MouseEvent) => {
@@ -797,14 +950,50 @@ export function DataGrid({
           disabled={!sel}
           title="Expand the focused cell"
         />
-        <Button
-          size="xs"
-          variant="ghost"
-          icon={<Clipboard className="size-3.5" />}
-          onClick={() => copySelection(false)}
-          disabled={!sel}
-          title="Copy the selection as TSV (⌘C, ⌘⇧C with header)"
-        />
+        <div className="relative">
+          <Button
+            size="xs"
+            variant="ghost"
+            icon={<Clipboard className="size-3.5" />}
+            onClick={() => setCopyMenuOpen((v) => !v)}
+            disabled={!sel}
+            title="Copy the selection (⌘C for TSV, ⌘⇧C with header)"
+          />
+          {copyMenuOpen && sel && (
+            <div
+              className="absolute right-0 z-30 mt-1 min-w-44 rounded border border-[var(--border)] bg-[var(--bg-raised)] py-1 shadow-lg"
+              onMouseLeave={() => setCopyMenuOpen(false)}
+            >
+              {COPY_ITEMS.map((item) => {
+                // INSERT and UPDATE need a single known table and a SQL engine.
+                const needsTable = item.format === 'insert' || item.format === 'update';
+                const disabled = needsTable && (!result.editTarget || !engine);
+                return (
+                  <button
+                    key={item.format}
+                    type="button"
+                    disabled={disabled}
+                    className={cn(
+                      'block w-full px-3 py-1 text-left text-[11px]',
+                      disabled
+                        ? 'cursor-not-allowed text-[var(--fg-subtle)]'
+                        : 'hover:bg-[var(--bg-hover)]',
+                    )}
+                    title={
+                      disabled ? 'Only for a result whose rows come from one table' : undefined
+                    }
+                    onClick={() => {
+                      setCopyMenuOpen(false);
+                      copyAs(item.format);
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
         {result.notices && result.notices.length > 0 && (
           <span
@@ -829,6 +1018,7 @@ export function DataGrid({
         aria-colcount={order.length}
         onKeyDown={onKeyDown}
         onMouseDown={onGridMouseDown}
+        onContextMenu={onGridContextMenu}
         onDoubleClick={onGridDoubleClick}
         className="mono relative min-h-0 flex-1 overflow-auto outline-none"
       >
@@ -1014,6 +1204,70 @@ export function DataGrid({
         paging={paging}
         counts={counts}
       />
+
+      {ctx && (
+        <>
+          {/* A full-screen catcher, so any click or scroll dismisses the menu. */}
+          <div className="fixed inset-0 z-40" onMouseDown={() => setCtx(null)} onWheel={() => setCtx(null)} />
+          <div
+            className="fixed z-50 min-w-56 rounded border border-[var(--border)] bg-[var(--bg-raised)] py-1 shadow-lg"
+            style={{ left: ctx.x, top: ctx.y }}
+          >
+            <button
+              type="button"
+              className="block w-full px-3 py-1 text-left text-[11px] hover:bg-[var(--bg-hover)]"
+              onClick={() => {
+                setCtx(null);
+                setViewerAt(ctx.point);
+              }}
+            >
+              Expand cell
+            </button>
+
+            {destinations.out.length > 0 && (
+              <>
+                <div className="mt-1 border-t border-[var(--border)] px-3 pt-1 text-[10px] uppercase text-[var(--fg-subtle)]">
+                  Go to
+                </div>
+                {destinations.out.map((d, i) => (
+                  <button
+                    key={`out-${i}`}
+                    type="button"
+                    className="block w-full px-3 py-1 text-left text-[11px] hover:bg-[var(--bg-hover)]"
+                    onClick={() => goTo(d)}
+                  >
+                    {d.label}
+                  </button>
+                ))}
+              </>
+            )}
+
+            {destinations.in.length > 0 && (
+              <>
+                <div className="mt-1 border-t border-[var(--border)] px-3 pt-1 text-[10px] uppercase text-[var(--fg-subtle)]">
+                  Referenced by
+                </div>
+                {destinations.in.map((d, i) => (
+                  <button
+                    key={`in-${i}`}
+                    type="button"
+                    className="block w-full px-3 py-1 text-left text-[11px] hover:bg-[var(--bg-hover)]"
+                    onClick={() => goTo(d)}
+                  >
+                    {d.label}
+                  </button>
+                ))}
+              </>
+            )}
+
+            {destinations.out.length === 0 && destinations.in.length === 0 && (
+              <div className="px-3 py-1 text-[11px] text-[var(--fg-subtle)]">
+                No foreign keys touch this row
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {viewerAt && columns[order[viewerAt.c]] && (
         <CellViewer
