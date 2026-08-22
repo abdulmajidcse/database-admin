@@ -17,7 +17,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Duplex, Writable } from 'node:stream';
 import { SQL_ENGINES, type EngineKind, type TableModel } from '../../../lib/schema-model';
@@ -46,7 +46,7 @@ import {
   type DumpContent,
   type SqlWriterOptions,
 } from './sql-writer';
-import {
+import { resolveExportPath,
   attachWriter,
   finishWriter,
   openSink,
@@ -533,10 +533,26 @@ async function endSnapshot(connector: SqlConnector, sessionId: string, commit: b
 // runExport
 // ---------------------------------------------------------------------------
 
-async function writeIncompleteMarker(dir: string, err: unknown): Promise<void> {
+/**
+ * Where the marker belongs, resolved the same way the table files are.
+ *
+ * `destination.path` may be relative to `destination.root` — sinkSpecFor passes
+ * both through resolveExportPath. Joining the raw path instead wrote the marker
+ * next to the process's working directory while the tables went to the export
+ * root, and the `.catch()` swallowed the ENOENT, so a *failed* export was left
+ * unmarked and imported as though it were whole.
+ */
+function markerPathFor(destination: { path: string; root?: string }): string {
+  return path.join(resolveExportPath(destination.path, destination.root), INCOMPLETE_MARKER);
+}
+
+async function writeIncompleteMarker(
+  destination: { path: string; root?: string },
+  err: unknown,
+): Promise<void> {
   const reason = err instanceof Error ? err.message : String(err);
   await writeFile(
-    path.join(dir, INCOMPLETE_MARKER),
+    markerPathFor(destination),
     `This export did not finish, so the files here are only part of the database.\n` +
       `Do not restore from it.\n\nReason: ${reason}\n`,
     'utf8',
@@ -848,6 +864,14 @@ export async function runExport(
     }
 
     if (sessionId && isSqlConnector(connector)) await endSnapshot(connector, sessionId, true);
+    if (destination.kind === 'directory') {
+      // Clear any marker a previous failed export into this directory left. It
+      // is not removed on success elsewhere, so re-running a failed export
+      // rewrote every table and still left the directory permanently
+      // unimportable — and the import error told the user to delete the marker,
+      // which teaches them to bypass the guard.
+      await rm(markerPathFor(destination), { force: true }).catch(() => undefined);
+    }
     report('done', true);
     return {
       format,
@@ -873,7 +897,7 @@ export async function runExport(
       // of CSVs is exactly what a bundle import consumes. Without this marker,
       // half a database restores as though it were all of it. Best-effort — if
       // the directory is what broke, there is nothing further to do here.
-      await writeIncompleteMarker(destination.path, err).catch(() => undefined);
+      await writeIncompleteMarker(destination, err).catch(() => undefined);
     }
     ctx.log?.(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
     throw err;

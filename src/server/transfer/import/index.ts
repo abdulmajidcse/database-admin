@@ -304,6 +304,15 @@ async function runBundleImport(
   const reports: ImportReport[] = [];
   const loaded: string[] = [];
   for (const [index, member] of members.entries()) {
+    // Checked between members as well as inside each one. A cancel arriving
+    // mid-member unwinds that member, but the loop used to carry on and run
+    // CREATE TABLE and TRUNCATE for every remaining file before each one
+    // aborted in turn — so cancelling a fifty-file restore still touched fifty
+    // tables.
+    if (ctx.signal?.aborted) {
+      ctx.log(`Cancelled after ${index} of ${members.length} file(s).`);
+      throw new ImportCancelled();
+    }
     const name = basename(member.path);
     ctx.log(`[${index + 1}/${members.length}] ${name} → ${member.table}`);
     const size = (await stat(member.path)).size;
@@ -319,6 +328,14 @@ async function runBundleImport(
       );
       loaded.push(member.table);
     } catch (err) {
+      // A cancel is not a member failure. `continueOnError` says what to do
+      // about bad data, not about the user asking us to stop, and wrapping it
+      // as BUNDLE_MEMBER_FAILED made the job record a failure rather than a
+      // cancellation.
+      if (err instanceof ImportCancelled || ctx.signal?.aborted) {
+        ctx.log(`Cancelled during ${name}. Committed: ${loaded.length === 0 ? 'none' : loaded.join(', ')}.`);
+        throw err instanceof ImportCancelled ? err : new ImportCancelled();
+      }
       const message = err instanceof Error ? err.message : String(err);
       // Members commit individually, so by the time one fails the earlier ones
       // are already durable. Saying which is the difference between a recoverable

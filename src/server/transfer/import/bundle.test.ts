@@ -79,6 +79,32 @@ describe('bundleMembers', () => {
     await expect(bundleMembers(dir)).rejects.toThrow(/no csv/i);
   });
 
+  it('splits a qualified filename, which is what a whole-database export writes', async () => {
+    // The exporter labels a source `public.users` when the engine reports a
+    // schema, so the file is `public.users.csv`. Reading the stem whole gave a
+    // table literally named "public.users" — the round trip this feature exists
+    // for was broken on every engine except SQLite, which has no schemas.
+    const dir = await dirWith(['public.users.csv', 'shop.orders.tsv']);
+    const members = await bundleMembers(dir);
+    // Members come back sorted, so orders precedes users.
+    expect(members.map((m) => m.table)).toEqual(['orders', 'users']);
+    expect(members.map((m) => m.schema)).toEqual(['shop', 'public']);
+  });
+
+  it('leaves an unqualified filename alone', async () => {
+    const dir = await dirWith(['users.csv']);
+    const members = await bundleMembers(dir);
+    expect(members[0].table).toBe('users');
+    expect(members[0].schema).toBeUndefined();
+  });
+
+  it('treats only the last dot as the separator', async () => {
+    const dir = await dirWith(['my.db.users.csv']);
+    const members = await bundleMembers(dir);
+    expect(members[0].table).toBe('users');
+    expect(members[0].schema).toBe('my.db');
+  });
+
   it('refuses two files that would load into the same table', async () => {
     // users.csv and users.tsv both mean "users"; loading both would silently
     // append one onto the other, which no one asks for on purpose.
@@ -94,6 +120,20 @@ describe('bundleMemberOverrides', () => {
     const o = bundleMemberOverrides({ target: { schema: 'public', table: '', createTable: true } }, member);
     expect(o.source).toEqual({ kind: 'csv', path: '/data/exports/db/orders.csv' });
     expect(o.target).toEqual({ schema: 'public', table: 'orders', createTable: true });
+  });
+
+  it("uses the filename's schema when the request names none", () => {
+    const out = bundleMemberOverrides({}, { path: '/d/public.users.csv', table: 'users', schema: 'public' });
+    expect(out.target.schema).toBe('public');
+    expect(out.target.table).toBe('users');
+  });
+
+  it('lets an explicit target schema win, so you can restore elsewhere', () => {
+    const out = bundleMemberOverrides(
+      { target: { schema: 'staging', table: 'ignored' } },
+      { path: '/d/public.users.csv', table: 'users', schema: 'public' },
+    );
+    expect(out.target.schema).toBe('staging');
   });
 
   it('clears the mapping so each file derives one from its own header', () => {
