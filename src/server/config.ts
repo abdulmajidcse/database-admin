@@ -35,6 +35,15 @@ export const CONFIG = {
   /** Idle pool timeout, below the usual 5-minute NAT window (§8.3). */
   poolIdleMs: Number(env('DBADMIN_POOL_IDLE_MS', String(4 * 60 * 1000))),
   sshDir: env('DBADMIN_SSH_DIR', path.join(homedir(), '.ssh')),
+  /**
+   * Extra hostnames the Host/Origin gate accepts, comma-separated (§9). This is
+   * how you put the app behind a reverse proxy: name the hostname the proxy
+   * serves. A leading `*.` matches labels beneath a suffix.
+   */
+  allowedHosts: env('DBADMIN_ALLOWED_HOSTS', '')
+    .split(',')
+    .map((h) => h.trim())
+    .filter((h) => h !== ''),
   /** Disable the auth/CSRF token — only for tests. */
   disableAuth: process.env.DBADMIN_DISABLE_AUTH === '1',
   isDev: process.env.NODE_ENV !== 'production',

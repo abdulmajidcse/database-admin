@@ -18,6 +18,11 @@ services:
       # Where the SQLite file browser and export picker are rooted (§10.4).
       DBADMIN_SQLITE_ROOT: /data/sqlite
       DBADMIN_EXPORT_ROOT: /data/exports
+      # Hostnames a reverse proxy serves the app on (§9). Compose only passes
+      # through what is named here, so without this line the variable is set on
+      # the host and undefined in the container — the escape hatch looks
+      # configured and does nothing.
+      DBADMIN_ALLOWED_HOSTS: ${DBADMIN_ALLOWED_HOSTS:-}
       # Docker Desktop's SSH agent bridge (§10.3). Harmless when absent.
       SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
     volumes:
