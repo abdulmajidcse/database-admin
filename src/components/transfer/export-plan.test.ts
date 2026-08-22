@@ -7,6 +7,7 @@
  * folder. None of those fail loudly at the point of the mistake.
  */
 
+import { validate } from './export-dialog';
 import { describe, expect, it } from 'vitest';
 
 import { exportDestination, destinationProblems, splitsPerTable } from './export-plan';
@@ -84,5 +85,43 @@ describe('destinationProblems', () => {
     expect(
       destinationProblems({ ...base, format: 'sql', perTable: false, toFile: true, path: 'db.sql' }),
     ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Guards that stop the tool producing output it cannot read back
+// ---------------------------------------------------------------------------
+
+describe('validate', () => {
+  const base = {
+    connectionId: 'c1',
+    scope: 'database' as const,
+    statement: '',
+    tableName: '',
+    database: 'mydb',
+    toFile: true,
+    path: '/data/exports/mydb',
+    format: 'csv' as const,
+    documentEngine: false,
+    schemaName: '',
+    perTable: true,
+    gzip: false,
+  };
+
+  it('refuses gzip together with one file per table', () => {
+    // A gzipped directory export writes users.csv.gz, and those are exactly the
+    // names the bundle importer refuses — the tool could not read its own
+    // output. Caught here rather than at import, after the export has run.
+    const out = validate({ ...base, gzip: true });
+    expect(out.join(' ')).toMatch(/gzip/i);
+  });
+
+  it('allows gzip for a single-file export', () => {
+    const out = validate({ ...base, perTable: false, format: 'sql', gzip: true });
+    expect(out.join(' ')).not.toMatch(/gzip/i);
+  });
+
+  it('allows a per-table export without gzip', () => {
+    expect(validate(base).join(' ')).not.toMatch(/gzip/i);
   });
 });

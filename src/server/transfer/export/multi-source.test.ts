@@ -10,7 +10,7 @@
  * written.
  */
 
-import { mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -206,6 +206,28 @@ describe('multi-source exports into a directory', () => {
       consistentSnapshot: false,
       content: 'data',
     });
+    expect(await readdir(dir)).not.toContain('.dbadmin-incomplete');
+  });
+
+  it('clears a marker a previous failed export left in the same directory', async () => {
+    // The existing clean-export test uses a fresh mkdtemp directory, so it
+    // cannot see this: a retry after a failure rewrote every table and left the
+    // marker, making the completed export permanently unimportable — and the
+    // import error told the user to delete the marker, teaching them to bypass
+    // the guard.
+    const dir = await mkdtemp(path.join(tmpdir(), 'dbadmin-export-'));
+    await writeFile(path.join(dir, '.dbadmin-incomplete'), 'left by an earlier failure\n');
+    expect(await readdir(dir)).toContain('.dbadmin-incomplete');
+
+    await runExport({
+      connector: fakeConnector(),
+      format: 'csv',
+      sources: [users(), orders()],
+      destination: { kind: 'directory', path: dir, root: dir },
+      consistentSnapshot: false,
+      content: 'data',
+    });
+
     expect(await readdir(dir)).not.toContain('.dbadmin-incomplete');
   });
 

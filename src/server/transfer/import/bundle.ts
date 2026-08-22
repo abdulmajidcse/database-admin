@@ -26,8 +26,14 @@ const DELIMITED = new Set(['.csv', '.tsv']);
 export interface BundleMember {
   /** Absolute path to the file. */
   path: string;
-  /** Table it loads into — the file's name with its extensions removed. */
+  /** Table it loads into. */
   table: string;
+  /**
+   * Schema the filename named, when it carried one. Only a fallback: an
+   * explicit target schema on the request wins, because the user may be
+   * restoring into a different one than they exported from.
+   */
+  schema?: string;
 }
 
 /**
@@ -58,13 +64,19 @@ export async function bundleMembers(dir: string): Promise<BundleMember[]> {
   const compressed: string[] = [];
 
   for (const entry of entries) {
-    if (!entry.isFile()) continue;
+    // A symlink to a CSV is a file for our purposes: readdir does not follow
+    // links, so `isFile()` is false for one and the member vanished from the
+    // import without a word. This module refuses rather than skips for a
+    // gzipped member for exactly that reason — dropping a table from a
+    // whole-database restore is the failure it exists to prevent.
+    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
     if (isCompressedData(entry.name)) {
       compressed.push(entry.name);
       continue;
     }
-    const table = tableNameFor(entry.name);
-    if (table === null) continue;
+    const parsed = tableNameFor(entry.name);
+    if (parsed === null) continue;
+    const { table, schema } = parsed;
 
     const previous = seen.get(table);
     if (previous !== undefined) {
@@ -78,7 +90,7 @@ export async function bundleMembers(dir: string): Promise<BundleMember[]> {
       );
     }
     seen.set(table, entry.name);
-    members.push({ path: path.join(dir, entry.name), table });
+    members.push({ path: path.join(dir, entry.name), table, ...(schema ? { schema } : {}) });
   }
 
   // Refused, not skipped. The CSV reader opens a plain `createReadStream` with
@@ -117,12 +129,29 @@ function isCompressedData(filename: string): boolean {
   return DELIMITED.has(path.extname(lower.slice(0, -wrapper.length)));
 }
 
-/** `users.csv` means the table `users`; `a.md` means nothing. */
-function tableNameFor(filename: string): string | null {
+/**
+ * `users.csv` is the table `users`; `public.users.csv` is `users` in `public`;
+ * `a.md` is nothing.
+ *
+ * The qualified form is what a whole-database export writes whenever the engine
+ * reports a schema — the source is labelled `public.users` and the stem keeps
+ * the dot. Reading the stem whole produced a table literally called
+ * "public.users", so the export/import round trip only worked on SQLite.
+ *
+ * The last dot separates, which is ambiguous for a table whose name genuinely
+ * contains one. That case loses nothing important: the schema is a fallback the
+ * request can override, and the alternative — never splitting — breaks the
+ * common case on two of the three SQL engines.
+ */
+function tableNameFor(filename: string): { table: string; schema?: string } | null {
   const ext = path.extname(filename).toLowerCase();
   if (!DELIMITED.has(ext)) return null;
-  const table = filename.slice(0, -ext.length);
-  return table === '' ? null : table;
+  const stem = filename.slice(0, -ext.length);
+  if (stem === '') return null;
+
+  const cut = stem.lastIndexOf('.');
+  if (cut <= 0 || cut === stem.length - 1) return { table: stem };
+  return { schema: stem.slice(0, cut), table: stem.slice(cut + 1) };
 }
 
 /**
@@ -151,7 +180,15 @@ export function bundleMemberOverrides(
 } {
   return {
     source: { kind: 'csv', path: member.path },
-    target: { ...params.target, table: member.table },
+    target: {
+      ...params.target,
+      table: member.table,
+      // An explicit target schema wins: restoring into a different schema than
+      // you exported from is a normal thing to want. The filename's schema is
+      // the fallback, so a whole-database export lands back where it came from
+      // when the user names no target.
+      schema: params.target?.schema ?? member.schema,
+    },
     mapping: [],
     keyColumns: undefined,
     csv: undefined,

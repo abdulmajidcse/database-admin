@@ -463,6 +463,15 @@ export function startExportJob(req: ApiExportRequest, path: string): string {
     // pointing pg_dump at `absolute` would write a single file where the user
     // asked for a directory of them. The built-in engine handles this scope.
     const config = perTable ? null : connectionsRepo.get(req.connectionId);
+    if (perTable && req.options.useNativeTool) {
+      // The non-perTable path always logs why it fell back; this one dropped the
+      // user's choice silently, so somebody who ticked it for definer or
+      // collation fidelity had no way to learn they did not get it.
+      ctx.log(
+        'Built-in streaming engine: the native dump tool writes a single file and ' +
+          'this export needs one file per table.',
+      );
+    }
     if (config) {
       const outcome = await nativeDump(
         config,

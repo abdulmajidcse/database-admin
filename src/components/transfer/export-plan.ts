@@ -58,6 +58,8 @@ export interface ExportPlanState {
   toFile: boolean;
   path: string;
   perTable: boolean;
+  /** Needed here because gzip and a per-table split cannot be combined. */
+  gzip?: boolean;
 }
 
 export function exportDestination(state: ExportPlanState): ExportRequest['destination'] {
