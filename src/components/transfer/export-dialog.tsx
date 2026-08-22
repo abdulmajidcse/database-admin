@@ -269,6 +269,7 @@ export function ExportDialog({ open, onClose, connectionId, initialSource, sql, 
     documentEngine,
     schemaName,
     perTable,
+    gzip,
   });
 
   async function submit(): Promise<void> {
@@ -800,7 +801,7 @@ function suggestFilename(source: ExportRequest['source'], format: ExportFormat, 
  * a toast well after the dialog has closed and claimed success. Each of these
  * mirrors a specific server-side refusal (api/export/build.ts, transfer/export).
  */
-function validate(state: {
+export function validate(state: {
   connectionId: string | null;
   scope: ScopeKind;
   statement: string;
@@ -812,6 +813,7 @@ function validate(state: {
   documentEngine: boolean;
   schemaName: string;
   perTable: boolean;
+  gzip: boolean;
 }): string[] {
   const out: string[] = [];
   if (!state.connectionId) out.push('Pick a connection first.');
@@ -823,13 +825,14 @@ function validate(state: {
   if (state.documentEngine && state.scope === 'table' && state.schemaName.trim() === '') {
     out.push('Name the MongoDB database the collection lives in.');
   }
-  // runExport refuses a combined file for these formats — a second header (or a
-  // second JSON array) mid-file is unreadable. With the split on, each table
-  // gets its own file and the export is fine, so this only fires without it.
-  if (mustSplit(state.scope, state.format) && !splitsPerTable(state)) {
+  // A gzipped directory export writes `users.csv.gz`, and those are exactly the
+  // names the bundle importer refuses outright — so the tool's own output could
+  // not be read back. Refused here rather than at import time, where the user
+  // has already waited for the export.
+  if (splitsPerTable(state) && state.gzip) {
     out.push(
-      `A ${state.format.toUpperCase()} file holds one table. Turn on "one file per table", ` +
-        'or export as SQL or XLSX to get every table in a single file.',
+      'Gzip and "one file per table" cannot be combined: the importer cannot read ' +
+        'a folder of .csv.gz files. Turn one of them off.',
     );
   }
   // A filename left in the box after the destination became a directory.
