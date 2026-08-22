@@ -33,17 +33,7 @@ export function isPublicApiPath(pathname: string): boolean {
 }
 
 /**
- * Host must be a loopback name we serve on. A rebinding attack arrives with an
- * attacker-controlled Host header, so an allow-list is the defence.
- */
-/** Extra names a reverse proxy answers on, from DBADMIN_ALLOWED_HOSTS. */
-const EXTRA_HOSTS: readonly string[] = (process.env.DBADMIN_ALLOWED_HOSTS ?? '')
-  .split(',')
-  .map((h) => h.trim().toLowerCase())
-  .filter((h) => h !== '');
-
-/**
- * Just the host, lowercased, with the port and any IPv6 brackets removed.
+ * Just the hostname, lowercased, with the port and any IPv6 brackets removed.
  *
  * RFC 7230 requires brackets around an IPv6 literal, but a bare `::1` turns up
  * in practice and splitting it on `:` yields an empty string — which is why
@@ -61,42 +51,97 @@ function hostnameOf(hostHeader: string): string {
   return raw.split(':')[0].toLowerCase();
 }
 
+/** The explicit port in a Host header, or undefined when it carries none. */
+function portOf(hostHeader: string): string | undefined {
+  const raw = hostHeader.trim();
+  if (raw.startsWith('[')) {
+    const after = raw.slice(raw.indexOf(']') + 1);
+    return after.startsWith(':') ? after.slice(1) : undefined;
+  }
+  if (raw.indexOf(':') !== raw.lastIndexOf(':')) return undefined; // bare IPv6
+  const parts = raw.split(':');
+  return parts.length > 1 && parts[1] !== '' ? parts[1] : undefined;
+}
+
+/**
+ * Names this install answers on beyond loopback, from DBADMIN_ALLOWED_HOSTS.
+ *
+ * This is the supported way to put the app behind a reverse proxy: name the
+ * hostname the proxy serves, e.g. `database-admin.localhost` or `db.internal`.
+ * A leading `*.` matches one or more labels beneath that suffix.
+ *
+ * There is deliberately no blanket `*.localhost` allowance. It looks safe —
+ * RFC 6761 reserves the TLD and Chrome and Firefox resolve it to loopback
+ * without asking DNS — but Safari does not special-case subdomains of
+ * localhost, and a resolver appending a search domain does not either. An
+ * attacker who controls DNS for `evil.localhost` could then rebind it to
+ * 127.0.0.1 and reach the API *same-host*, which means the SameSite=Strict
+ * session cookie is sent and every defence in §9 passes at once. Naming the one
+ * hostname you actually serve costs a line of config and gives an attacker
+ * nothing.
+ *
+ * Entries are normalized the same way an incoming Host header is, so
+ * `db.example.com:8080` and `[fd00::1]` match rather than silently never
+ * matching.
+ */
+const EXTRA_HOSTS: readonly string[] = CONFIG.allowedHosts.map((h) =>
+  h.startsWith('*.') ? `*.${hostnameOf(h.slice(2))}` : hostnameOf(h),
+);
+
+function matchesExtra(host: string): boolean {
+  return EXTRA_HOSTS.some((entry) => {
+    if (!entry.startsWith('*.')) return entry === host;
+    const suffix = entry.slice(1); // ".example.com"
+    return host.endsWith(suffix) && host.length > suffix.length;
+  });
+}
+
+/**
+ * Host must be a name we actually serve on. A rebinding attack arrives with an
+ * attacker-controlled Host header, so an allow-list is the defence (§9).
+ */
 export function isAllowedHost(hostHeader: string | undefined): boolean {
   if (!hostHeader) return false;
   const host = hostnameOf(hostHeader);
+  if (host === '') return false;
   return (
     host === 'localhost' ||
     host === '127.0.0.1' ||
     host === '::1' ||
     host === '0.0.0.0' ||
-    // A subdomain of .localhost, which is how a reverse proxy is usually
-    // addressed (`database-admin.localhost` behind Caddy or Traefik). RFC 6761
-    // reserves the TLD and browsers resolve it to loopback without asking DNS,
-    // so it is no more reachable from outside than `localhost` itself — the
-    // same reasoning behind Next's own `**.localhost` dev allowance. The check
-    // is on a label boundary, so `localhost.evil.com` does not match.
-    host.endsWith('.localhost') ||
     // Reaching the container by its service name on a compose network is
     // legitimate; `app` is compose.yml's service.
     host === 'app' ||
     host === 'host.docker.internal' ||
-    EXTRA_HOSTS.includes(host)
+    matchesExtra(host)
   );
+}
+
+/** Authority as `hostname:port`, with the scheme's default filled in. */
+function authority(hostname: string, port: string | undefined, scheme: string): string {
+  const fallback = scheme === 'https:' ? '443' : '80';
+  return `${hostname}:${port && port !== '' ? port : fallback}`;
 }
 
 export function isAllowedOrigin(origin: string | undefined, hostHeader: string | undefined): boolean {
   // Same-origin fetches from the app itself often omit Origin on GET.
   if (!origin) return true;
+  if (!hostHeader) return false;
   try {
     const u = new URL(origin);
-    if (!isAllowedHost(u.host)) return false;
-    // Same-origin means the Origin IS the authority we were reached on, so the
-    // two headers are compared to each other. The previous check compared the
-    // Origin's port to the port this process listens on, which is wrong behind
-    // any reverse proxy: the browser talks to :80 or :443 while the app serves
-    // 3456, and every request was refused.
-    if (!hostHeader) return false;
-    return u.host.toLowerCase() === hostHeader.toLowerCase();
+    // Same-origin means the Origin IS the authority we were reached on. The
+    // check this replaced compared the Origin's port to the port this process
+    // listens on, which refuses every request behind a proxy — the browser
+    // talks to :80 or :443 while the app serves 3456.
+    //
+    // Both sides are normalized rather than compared as strings: nginx's
+    // widely-copied `proxy_set_header Host $host:$server_port` sends
+    // `name:443` while the browser's Origin is `https://name` with the default
+    // port implied, and a bracketed `[::1]:3456` Origin never equals a bare
+    // `::1` Host.
+    const originAuthority = authority(hostnameOf(u.host), u.port, u.protocol);
+    const hostAuthority = authority(hostnameOf(hostHeader), portOf(hostHeader), u.protocol);
+    return originAuthority === hostAuthority;
   } catch {
     return false;
   }

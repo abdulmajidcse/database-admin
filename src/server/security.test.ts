@@ -23,11 +23,15 @@ describe('isAllowedHost', () => {
     expect(isAllowedHost('host.docker.internal:3456')).toBe(true);
   });
 
-  it('allows a .localhost subdomain, which is how reverse proxies are addressed', () => {
-    // RFC 6761 reserves .localhost and browsers resolve it to loopback, so a
-    // subdomain of it is no more reachable from outside than localhost itself.
-    expect(isAllowedHost('database-admin.localhost')).toBe(true);
-    expect(isAllowedHost('db.admin.localhost:80')).toBe(true);
+  it('refuses a .localhost subdomain unless it was named explicitly', () => {
+    // Deliberately NOT allowed wholesale. Chrome and Firefox resolve
+    // *.localhost to loopback without asking DNS; Safari does not, so an
+    // attacker controlling DNS for evil.localhost could rebind it to 127.0.0.1
+    // and reach the API same-host — which sends the SameSite=Strict cookie.
+    expect(isAllowedHost('database-admin.localhost')).toBe(false);
+    expect(isAllowedHost('evil.localhost')).toBe(false);
+    // The degenerate empty first label must not slip through either.
+    expect(isAllowedHost('.localhost')).toBe(false);
   });
 
   it('refuses an attacker domain, including one dressed up to look local', () => {
@@ -75,11 +79,22 @@ describe('isAllowedOrigin', () => {
     expect(isAllowedOrigin('http://localhost.evil.com', 'localhost:3456')).toBe(false);
   });
 
+  it('matches a Host carrying an explicit default port against an Origin without one', () => {
+    // nginx's widely-copied `proxy_set_header Host $host:$server_port` sends
+    // name:443 while the browser's Origin implies it.
+    expect(isAllowedOrigin('https://localhost', 'localhost:443')).toBe(true);
+    expect(isAllowedOrigin('http://localhost', 'localhost:80')).toBe(true);
+  });
+
+  it('matches a bracketed IPv6 Origin against a bare IPv6 Host', () => {
+    expect(isAllowedOrigin('http://[::1]:3456', '::1:3456')).toBe(false);
+    expect(isAllowedOrigin('http://[::1]:3456', '[::1]:3456')).toBe(true);
+  });
+
   it('refuses an allowed-looking Origin that is not the Host we answered on', () => {
     // Both are loopback, but they are still different origins, and a browser
     // making a genuine same-origin request never sends this pair.
     expect(isAllowedOrigin('http://localhost:9999', 'localhost:3456')).toBe(false);
-    expect(isAllowedOrigin('http://other.localhost', 'database-admin.localhost')).toBe(false);
   });
 
   it('refuses a malformed Origin rather than parsing around it', () => {
