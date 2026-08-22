@@ -36,18 +36,51 @@ export function isPublicApiPath(pathname: string): boolean {
  * Host must be a loopback name we serve on. A rebinding attack arrives with an
  * attacker-controlled Host header, so an allow-list is the defence.
  */
+/** Extra names a reverse proxy answers on, from DBADMIN_ALLOWED_HOSTS. */
+const EXTRA_HOSTS: readonly string[] = (process.env.DBADMIN_ALLOWED_HOSTS ?? '')
+  .split(',')
+  .map((h) => h.trim().toLowerCase())
+  .filter((h) => h !== '');
+
+/**
+ * Just the host, lowercased, with the port and any IPv6 brackets removed.
+ *
+ * RFC 7230 requires brackets around an IPv6 literal, but a bare `::1` turns up
+ * in practice and splitting it on `:` yields an empty string — which is why
+ * `::1` and `[::1]:3456` were both silently refused before this, despite `::1`
+ * being in the allow-list.
+ */
+function hostnameOf(hostHeader: string): string {
+  const raw = hostHeader.trim();
+  if (raw.startsWith('[')) {
+    return (raw.match(/^\[([^\]]*)\]/)?.[1] ?? raw).toLowerCase();
+  }
+  // More than one colon and no brackets: a bare IPv6 literal, port and all is
+  // the address.
+  if (raw.indexOf(':') !== raw.lastIndexOf(':')) return raw.toLowerCase();
+  return raw.split(':')[0].toLowerCase();
+}
+
 export function isAllowedHost(hostHeader: string | undefined): boolean {
   if (!hostHeader) return false;
-  const host = hostHeader.split(':')[0].toLowerCase().replace(/^\[|\]$/g, '');
+  const host = hostnameOf(hostHeader);
   return (
     host === 'localhost' ||
     host === '127.0.0.1' ||
     host === '::1' ||
     host === '0.0.0.0' ||
+    // A subdomain of .localhost, which is how a reverse proxy is usually
+    // addressed (`database-admin.localhost` behind Caddy or Traefik). RFC 6761
+    // reserves the TLD and browsers resolve it to loopback without asking DNS,
+    // so it is no more reachable from outside than `localhost` itself — the
+    // same reasoning behind Next's own `**.localhost` dev allowance. The check
+    // is on a label boundary, so `localhost.evil.com` does not match.
+    host.endsWith('.localhost') ||
     // Reaching the container by its service name on a compose network is
     // legitimate; `app` is compose.yml's service.
     host === 'app' ||
-    host === 'host.docker.internal'
+    host === 'host.docker.internal' ||
+    EXTRA_HOSTS.includes(host)
   );
 }
 
@@ -57,10 +90,13 @@ export function isAllowedOrigin(origin: string | undefined, hostHeader: string |
   try {
     const u = new URL(origin);
     if (!isAllowedHost(u.host)) return false;
-    // Port must match what we are actually serving.
-    const hostPort = hostHeader?.split(':')[1] ?? String(CONFIG.port);
-    const originPort = u.port || (u.protocol === 'https:' ? '443' : '80');
-    return originPort === hostPort;
+    // Same-origin means the Origin IS the authority we were reached on, so the
+    // two headers are compared to each other. The previous check compared the
+    // Origin's port to the port this process listens on, which is wrong behind
+    // any reverse proxy: the browser talks to :80 or :443 while the app serves
+    // 3456, and every request was refused.
+    if (!hostHeader) return false;
+    return u.host.toLowerCase() === hostHeader.toLowerCase();
   } catch {
     return false;
   }
