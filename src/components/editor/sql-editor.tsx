@@ -168,6 +168,14 @@ export interface EditorHandle {
   format: () => void;
 }
 
+/**
+ * Stable identity for "no snippets yet". `?? []` allocated a fresh array every
+ * render, and props.snippets is a dependency of the language memo — so while
+ * the query was in flight, and for ever if it errored (retry is off), CodeMirror
+ * was reconfigured on every keystroke and the open completion popup torn down.
+ */
+const NO_SNIPPETS: EditorSnippet[] = [];
+
 export interface SqlEditorProps {
   value: string;
   onChange: (next: string) => void;
@@ -675,7 +683,7 @@ export function SqlWorkspace({ tab }: TabViewProps) {
             engine={engine}
             model={schemaQuery.data?.model ?? null}
             defaultSchema={schema}
-            snippets={snippetsQuery.data?.snippets ?? []}
+            snippets={snippetsQuery.data?.snippets ?? NO_SNIPPETS}
             errorMarks={errorMarks}
             onRunStatement={runStatement}
             onRunScript={runScript}

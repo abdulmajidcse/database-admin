@@ -54,6 +54,21 @@ export function TableTab({ tab }: { tab: WorkspaceTab }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offset, sort, filter]);
 
+  // A reused tab gets new state pushed into it — foreign-key navigation reuses
+  // the target table's tab and hands it a filter. These are read once into
+  // useState, so without this the tab would keep the filter it opened with and
+  // quietly show the wrong rows.
+  const incomingFilter = JSON.stringify(saved.filter ?? EMPTY_FILTER_STATE);
+  React.useEffect(() => {
+    setFilter((current) => {
+      if (JSON.stringify(current) === incomingFilter) return current;
+      // A different filter means a different result set, so page 1.
+      setOffset(0);
+      return JSON.parse(incomingFilter) as GridFilterState;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incomingFilter]);
+
   const data = useTableData({
     connectionId: tab.connectionId,
     schema: saved.schema,

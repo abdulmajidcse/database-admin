@@ -70,7 +70,8 @@ export function bindStatement(
     // opt-in, and a `?` the user did not mean as a placeholder is the driver's
     // business, which is how it behaved before binding existed.
     if (positional.length === 0) return { sql, params: [] };
-    const wanted = new Set(rest.map((p) => (p.style === 'dollar' ? p.ordinal : p.ordinal))).size;
+    // $n can repeat a number, so distinct ordinals is the count either way.
+    const wanted = new Set(rest.map((p) => p.ordinal)).size;
     if (positional.length !== wanted) {
       throw new BindError(
         `This statement has ${wanted} parameter(s) but ${positional.length} value(s) were supplied.`,

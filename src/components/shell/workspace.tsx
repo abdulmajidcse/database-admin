@@ -96,12 +96,21 @@ function useRegistry(): number {
 // Workspace
 // ---------------------------------------------------------------------------
 
-/** True for an element that owns the keystroke — a field, or a CodeMirror pane. */
+/**
+ * True for an element that owns the keystroke.
+ *
+ * Fields and CodeMirror panes are obvious. The results grid is not: it is a
+ * focusable `div[role=grid]` whose own handler starts a cell edit from any
+ * printable character, so `?` there both seeded an edit and opened this dialog
+ * over it — React's preventDefault does not stop a window-level listener.
+ */
 function isTypingTarget(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   if (!el || !el.tagName) return false;
   const tag = el.tagName.toLowerCase();
-  return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable === true;
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+  if (el.isContentEditable === true) return true;
+  return typeof el.closest === 'function' && el.closest('[role="grid"]') !== null;
 }
 
 export function Workspace() {

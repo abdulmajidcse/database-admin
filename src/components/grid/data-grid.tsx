@@ -51,6 +51,7 @@ import type { ColumnMeta, ResultSet } from '../../lib/results';
 import { cellToText, type Cell, type Row } from '../../lib/wire';
 import { renderInsertRows, renderUpdateRow } from '../../server/db/sql/dml';
 import { useConnections } from '../shell/connection-sidebar';
+import { workspaceModeFor } from '../../lib/connection';
 import { useSchema } from '../../hooks/use-schema';
 import { useWorkspaceStore } from '../../state/workspace-store';
 import { findTable } from '../../lib/schema-model';
@@ -159,6 +160,7 @@ function defaultWidth(col: ColumnMeta): number {
 export type CopyFormat = 'tsv' | 'tsv-header' | 'csv' | 'json' | 'markdown' | 'insert' | 'update';
 
 const COPY_ITEMS: { format: CopyFormat; label: string }[] = [
+  { format: 'tsv', label: 'Copy' },
   { format: 'tsv-header', label: 'Copy with header' },
   { format: 'csv', label: 'Copy as CSV' },
   { format: 'json', label: 'Copy as JSON' },
@@ -232,9 +234,10 @@ export function DataGrid({
   // guessing a quoting style.
   const connections = useConnections();
   const engine = connections.data?.connections.find((c) => c.id === connectionId)?.engine;
-  // Foreign keys come from the introspected model, which is cached — this adds
-  // no round trip to opening a grid.
-  const schema = useSchema(connectionId, { enabled: true });
+  // Whether the SQL copy formats mean anything here. Testing `!engine` was
+  // wrong: a Mongo connection has engine 'mongodb', which is truthy, so the
+  // entries stayed enabled and threw from quoterFor on a non-SQL engine.
+  const sqlEngine = engine !== undefined && workspaceModeFor(engine) === 'sql' ? engine : undefined;
 
   const [edit, dispatch] = useEditState();
   const [extraRows, setExtraRows] = React.useState<Row[]>([]);
@@ -250,6 +253,12 @@ export function DataGrid({
   const [viewerAt, setViewerAt] = React.useState<Point | null>(null);
   const [copyMenuOpen, setCopyMenuOpen] = React.useState(false);
   const [ctx, setCtx] = React.useState<{ x: number; y: number; point: Point } | null>(null);
+  // Foreign keys come from the introspected model. Fetched only once the
+  // context menu is actually open: use-schema documents `enabled` as "mounting
+  // a panel must never trigger a full introspection", and DataGrid is mounted
+  // by every table tab, every result tab and the Mongo document view — none of
+  // which needs the model until someone right-clicks.
+  const schema = useSchema(connectionId, { enabled: ctx !== null });
   const [detailRow, setDetailRow] = React.useState<number | null>(null);
   const [changesetOpen, setChangesetOpen] = React.useState(false);
   const [widths, setWidths] = React.useState<Record<string, number>>(() => initialWidths(columns));
@@ -509,12 +518,12 @@ export function DataGrid({
         if (format === 'insert' || format === 'update') {
           const target = result.editTarget;
           if (!target) throw new Error('These rows are not from a single table.');
-          if (!engine) throw new Error('This connection has no SQL dialect.');
+          if (!sqlEngine) throw new Error('This connection has no SQL dialect.');
           const rowsOut: Row[] = [];
           for (let r = rg.r0; r <= rg.r1; r++) rowsOut.push(cellsOf(r));
           payload =
             format === 'insert'
-              ? renderInsertRows({ schema: target.schema, table: target.table }, names, rowsOut, engine)
+              ? renderInsertRows({ schema: target.schema, table: target.table }, names, rowsOut, sqlEngine)
               : rowsOut
                   .map((row) =>
                     renderUpdateRow(
@@ -524,7 +533,7 @@ export function DataGrid({
                       // Only key columns actually inside the selection can key
                       // the statement; anything else is not in `row`.
                       target.keyColumns.filter((k) => names.includes(k)),
-                      engine,
+                      sqlEngine,
                     ),
                   )
                   .join('\n');
@@ -543,7 +552,13 @@ export function DataGrid({
           const lines = [`| ${names.join(' | ')} |`, `| ${names.map(() => '---').join(' | ')} |`];
           for (let r = rg.r0; r <= rg.r1; r++) {
             // A pipe inside a value would end the cell early.
-            lines.push(`| ${cellsOf(r).map((c) => textOf(c).replace(/\|/g, '\\|')).join(' | ')} |`);
+            // A pipe would end the cell early and a newline would end the row,
+            // so both are neutralised — CSV and TSV already quote theirs.
+            lines.push(
+              `| ${cellsOf(r)
+                .map((c) => textOf(c).replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>'))
+                .join(' | ')} |`,
+            );
           }
           payload = lines.join('\n');
         } else {
@@ -566,7 +581,7 @@ export function DataGrid({
         .then(() => toast.success(`Copied ${rg.r1 - rg.r0 + 1} × ${rg.c1 - rg.c0 + 1} cells`))
         .catch(() => toast.error('The browser refused clipboard access.'));
     },
-    [sel, columns, order, valueAt, result.editTarget, engine],
+    [sel, columns, order, valueAt, result.editTarget, sqlEngine],
   );
 
   /**
@@ -594,6 +609,11 @@ export function DataGrid({
     (dest: FkDestination) => {
       setCtx(null);
       useWorkspaceStore.getState().openTab({
+        // Same dedupe key the tree and the context menu use, so following three
+        // cells that reference one table reuses its tab instead of stacking up
+        // three identical ones. TableTab had to learn to re-read the filter for
+        // this to be correct — a reused tab used to keep its original one.
+        key: `table:${[dest.schema, dest.table].filter(Boolean).join('.')}`,
         kind: 'table',
         title: dest.table,
         connectionId,
@@ -967,7 +987,7 @@ export function DataGrid({
               {COPY_ITEMS.map((item) => {
                 // INSERT and UPDATE need a single known table and a SQL engine.
                 const needsTable = item.format === 'insert' || item.format === 'update';
-                const disabled = needsTable && (!result.editTarget || !engine);
+                const disabled = needsTable && (!result.editTarget || !sqlEngine);
                 return (
                   <button
                     key={item.format}
