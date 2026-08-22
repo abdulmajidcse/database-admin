@@ -54,7 +54,7 @@ its own second tokenizer, inside `sql-editor.tsx`, unverified, and bailing out
 entirely on MySQL `DELIMITER` scripts; it has been replaced rather than
 duplicated. And `⌘J` toggled the results panel while being documented nowhere.
 
-Test count went from 216 to 298.
+Test count went from 216 to 298; the suite stands at 381 today.
 
 ## 3. M11 — Object management
 
@@ -73,13 +73,16 @@ The DDL layer stops at tables. Everything else in the tree is read-only.
 
 ## 4. M12 — Data movement
 
-The transfer engine is built; three routes through it are missing.
+The transfer engine is built. Whole-database export and import landed separately (the ZIP
+bundle reader and writer), so what remains here is narrower than when this was written.
 
 - **Cross-engine table-to-table copy.** Already typed as `CopyJobParams` in `jobs/types.ts`,
   citing PLAN §7.6 as the stretch goal. The pipeline and the canonical model that does
   the type mapping both exist. What is missing is a UI and the wiring.
-- **JSON and XLSX import.** Export writes eight formats (`csv`, `tsv`, `json`, `ndjson`, `xlsx`, `markdown`, `html`, `sql`);
-  import reads CSV and SQL scripts.
+- **XLSX import.** Export writes eight formats (`csv`, `tsv`, `json`, `ndjson`, `xlsx`,
+  `markdown`, `html`, `sql`). Import now reads `csv`, `json`, `ndjson`, `sql`, `dump` and
+  `bundle` — a directory of per-table files — so only XLSX is left. JSON, NDJSON and bundle
+  import arrived with the whole-database transfer work, not with this milestone.
 - **Data compare and sync.** Schema compare exists. Row-level diff between two tables, with a
   generated reconciliation script, does not.
 
