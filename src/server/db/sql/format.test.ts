@@ -69,6 +69,18 @@ describe('formatSql', () => {
     expect(out).toContain("'a b  c'");
   });
 
+  it('leaves a MySQL DELIMITER script completely alone', () => {
+    // sql-formatter does not understand DELIMITER and would read the `;` inside
+    // the body as a terminator. The guard cannot catch the result, because a
+    // mangled body can still re-lex to the same statement count and kinds.
+    const sql = 'DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END $$\nDELIMITER ;';
+    expect(formatSql(sql, 'mysql')).toBe(sql);
+  });
+
+  it('still formats MySQL without a DELIMITER command', () => {
+    expect(formatSql('select a from t', 'mysql')).toContain('SELECT');
+  });
+
   it('leaves an empty or whitespace-only buffer alone', () => {
     expect(formatSql('', 'postgres')).toBe('');
     expect(formatSql('   \n  ', 'postgres')).toBe('   \n  ');
