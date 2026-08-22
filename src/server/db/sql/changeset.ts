@@ -141,9 +141,6 @@ export class AffectedRowsMismatchError extends Error {
   }
 }
 
-/** `?` for mysql2/better-sqlite3, `$n` for pg. */
-
-
 /**
  * Step 3/4 of the apply contract. Call it right after each statement, still
  * inside the transaction; throwing here is what triggers the ROLLBACK.

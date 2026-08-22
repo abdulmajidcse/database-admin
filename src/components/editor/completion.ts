@@ -355,12 +355,6 @@ export interface SqlLanguageOptions {
 }
 
 /**
- * The language extension the editor mounts. Rebuild it (a new array identity)
- * whenever the engine or the schema model changes — CodeMirror reconfigures
- * from the new extensions and completion becomes accurate immediately (§6
- * "Schema cache freshness").
- */
-/**
  * One user snippet, as the editor needs it (docs/roadmap.md M10).
  * `body` is CodeMirror snippet syntax, so `${1:table}` becomes a tab stop.
  */
@@ -402,6 +396,12 @@ export function snippetCompletionSource(
   };
 }
 
+/**
+ * The language extension the editor mounts. Rebuild it (a new array identity)
+ * whenever the engine or the schema model changes — CodeMirror reconfigures
+ * from the new extensions and completion becomes accurate immediately (§6
+ * "Schema cache freshness").
+ */
 export function sqlLanguageExtension(options: SqlLanguageOptions): Extension {
   const dialect = codeMirrorDialect(options.engine);
   const namespace = options.model ? buildSqlNamespace(options.model) : undefined;

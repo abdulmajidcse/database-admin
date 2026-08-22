@@ -88,30 +88,20 @@ export function ParamsBar({ sql, dialect, values, onChange }: ParamsBarProps) {
   }, [sql, dialect]);
 
   const [text, setText] = React.useState<Record<string, string>>({});
-  const [bad, setBad] = React.useState<Record<string, string>>({});
 
   if (names.length === 0) return null;
 
+  // parseParamInput has no failing branch — every input is bindable, because a
+  // parameter has no declared type to violate. There is deliberately no error
+  // state here; the try/catch and red border that used to sit in this file were
+  // unreachable and only suggested a validation that does not exist.
   const commit = (name: string, raw: string): void => {
     setText((t) => ({ ...t, [name]: raw }));
-    try {
-      const cell = parseParamInput(raw);
-      setBad((b) => {
-        const { [name]: _drop, ...rest } = b;
-        return rest;
-      });
-      onChange({ ...values, [name]: cell });
-    } catch (err) {
-      setBad((b) => ({ ...b, [name]: err instanceof Error ? err.message : 'Invalid value' }));
-    }
+    onChange({ ...values, [name]: parseParamInput(raw) });
   };
 
   const setNull = (name: string): void => {
     setText((t) => ({ ...t, [name]: '' }));
-    setBad((b) => {
-      const { [name]: _drop, ...rest } = b;
-      return rest;
-    });
     onChange({ ...values, [name]: null });
   };
 
@@ -133,12 +123,9 @@ export function ParamsBar({ sql, dialect, values, onChange }: ParamsBarProps) {
               value={isNull ? '' : (text[name] ?? displayOf(values[name]))}
               placeholder={isNull ? 'NULL' : ''}
               onChange={(e) => commit(name, e.target.value)}
-              title={bad[name]}
               className={cn(
-                'mono h-5 w-28 rounded border bg-[var(--bg)] px-1 text-[11px] outline-none',
-                bad[name]
-                  ? 'border-[var(--danger)]'
-                  : 'border-[var(--border)] focus:border-[var(--accent)]',
+                'mono h-5 w-28 rounded border border-[var(--border)] bg-[var(--bg)] px-1',
+                'text-[11px] outline-none focus:border-[var(--accent)]',
                 isNull && 'italic text-[var(--fg-subtle)]',
               )}
             />
@@ -152,13 +139,6 @@ export function ParamsBar({ sql, dialect, values, onChange }: ParamsBarProps) {
           </label>
         );
       })}
-      {Object.keys(bad).length > 0 && (
-        <span className="text-[11px] text-[var(--danger)]">
-          {Object.entries(bad)
-            .map(([n, m]) => `:${n} — ${m}`)
-            .join('; ')}
-        </span>
-      )}
     </div>
   );
 }

@@ -81,25 +81,38 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'mongo.run', keys: 'Mod-Enter', scope: 'mongo', label: 'Run the query or pipeline' },
 ];
 
-const IS_APPLE =
-  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+/**
+ * Resolved on each call rather than at import. Evaluating `navigator` at module
+ * scope bakes the server's answer (always non-Apple) into anything rendered
+ * before hydration, so a label rendered on the server would say Ctrl while the
+ * client says ⌘. editor-toolbar's useModifierLabel() defers for the same reason.
+ */
+function isApple(): boolean {
+  return (
+    typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+  );
+}
 
-const SYMBOL: Record<string, string> = {
-  Mod: IS_APPLE ? '⌘' : 'Ctrl',
-  Shift: IS_APPLE ? '⇧' : 'Shift',
-  Alt: IS_APPLE ? '⌥' : 'Alt',
-  Ctrl: IS_APPLE ? '⌃' : 'Ctrl',
-  Enter: '↩',
-  ArrowLeft: '←',
-  ArrowRight: '→',
-  ArrowUp: '↑',
-  ArrowDown: '↓',
-  Space: 'Space',
-  Delete: IS_APPLE ? '⌫' : 'Del',
-};
+function symbols(): Record<string, string> {
+  const apple = isApple();
+  return {
+    Mod: apple ? '⌘' : 'Ctrl',
+    Shift: apple ? '⇧' : 'Shift',
+    Alt: apple ? '⌥' : 'Alt',
+    Ctrl: apple ? '⌃' : 'Ctrl',
+    Enter: '↩',
+    ArrowLeft: '←',
+    ArrowRight: '→',
+    ArrowUp: '↑',
+    ArrowDown: '↓',
+    Space: 'Space',
+    Delete: apple ? '⌫' : 'Del',
+  };
+}
 
 /** A binding as it should be shown, e.g. `Mod-Shift-f` → `⌘⇧F`. */
 export function display(keys: string): string {
+  const SYMBOL = symbols();
   if (!keys.includes('-')) return SYMBOL[keys] ?? keys;
   const parts = keys.split('-');
   const rendered = parts.map((part, i) => {
@@ -108,7 +121,7 @@ export function display(keys: string): string {
     return i === parts.length - 1 && part.length === 1 ? part.toUpperCase() : part;
   });
   // Mac modifiers are conventionally run together; elsewhere they are joined.
-  return IS_APPLE ? rendered.join('') : rendered.join('+');
+  return isApple() ? rendered.join('') : rendered.join('+');
 }
 
 /** Look one up, so a call site can label itself from the same table. */
