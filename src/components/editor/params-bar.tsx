@@ -20,21 +20,51 @@
 import * as React from 'react';
 import { CircleSlash2, Variable } from 'lucide-react';
 
-import type { ColumnMeta } from '@/lib/results';
 import type { Cell } from '@/lib/wire';
 import { parameterNames } from '@/server/db/sql/bind';
 import type { SqlDialect } from '@/server/db/sql/lexer';
 import { Button, cn } from '@/components/ui/primitives';
-import { CellParseError, parseCellInput } from '@/components/grid/edit-state';
+
+const INTEGER_TEXT = /^[-+]?\d+$/;
+const NUMBER_TEXT = /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$/;
 
 /**
  * A bind parameter has no declared type — the engine coerces whatever arrives
- * using the target column's input function. `dynamicType` is precisely that
- * rule in `parseCellInput`: infer a number when the text is one, otherwise pass
- * the text through. So the parameter box behaves like a SQLite cell, which is
- * the one place the grid already models an untyped value.
+ * using the target column's input function.
+ *
+ * This deliberately does NOT reuse the grid's `dynamicType` branch, which was
+ * the first thing tried. That branch rounds anything numeric through a JS
+ * double, so `9007199254740993` becomes `…92` and a `DELETE … WHERE id = :id`
+ * silently addresses the wrong row. An integer too large for a double is kept
+ * as its lossless text instead, which is what the grid does for a *declared*
+ * integer column and what §6 requires everywhere.
  */
-const UNTYPED: ColumnMeta = { name: '', typeName: '', base: 'text', dynamicType: true };
+export function parseParamInput(text: string): Cell {
+  const t = text.trim();
+  if (t === '') return text;
+  if (INTEGER_TEXT.test(t)) {
+    return Number.isSafeInteger(Number(t)) ? Number(t) : { $t: 'bigint', v: t };
+  }
+  if (NUMBER_TEXT.test(t)) {
+    // A decimal that does not survive the round trip keeps its text, for the
+    // same reason: the engine's own input function is more precise than ours.
+    return String(Number(t)) === t ? Number(t) : { $t: 'decimal', v: t };
+  }
+  return text;
+}
+
+/**
+ * The stored value as editable text. Values are persisted on the tab, so after
+ * a reload (or a tab switch) they exist while this component's local text state
+ * does not — without this the box renders empty while a value is still bound,
+ * and pressing run binds something the user cannot see.
+ */
+function displayOf(cell: Cell | undefined): string {
+  if (cell === undefined || cell === null) return '';
+  if (typeof cell === 'string') return cell;
+  if (typeof cell === 'number' || typeof cell === 'boolean') return String(cell);
+  return typeof cell.v === 'string' ? cell.v : '';
+}
 
 export interface ParamsBarProps {
   sql: string;
@@ -65,14 +95,14 @@ export function ParamsBar({ sql, dialect, values, onChange }: ParamsBarProps) {
   const commit = (name: string, raw: string): void => {
     setText((t) => ({ ...t, [name]: raw }));
     try {
-      const cell = parseCellInput(raw, UNTYPED, undefined);
+      const cell = parseParamInput(raw);
       setBad((b) => {
         const { [name]: _drop, ...rest } = b;
         return rest;
       });
       onChange({ ...values, [name]: cell });
     } catch (err) {
-      setBad((b) => ({ ...b, [name]: err instanceof CellParseError ? err.message : 'Invalid value' }));
+      setBad((b) => ({ ...b, [name]: err instanceof Error ? err.message : 'Invalid value' }));
     }
   };
 
@@ -100,7 +130,7 @@ export function ParamsBar({ sql, dialect, values, onChange }: ParamsBarProps) {
           <label key={name} className="flex items-center gap-1">
             <span className="mono text-[11px] text-[var(--fg-muted)]">:{name}</span>
             <input
-              value={isNull ? '' : (text[name] ?? '')}
+              value={isNull ? '' : (text[name] ?? displayOf(values[name]))}
               placeholder={isNull ? 'NULL' : ''}
               onChange={(e) => commit(name, e.target.value)}
               title={bad[name]}
